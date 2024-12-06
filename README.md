@@ -4,7 +4,7 @@ There are a few steps
 ## Installation 
 ### HydraGNN
 
-[GFM](https://github.com/ORNL/HydraGNN/tree/Predictive_GFM_2024) 
+Install [HydraGNN](https://github.com/ORNL/HydraGNN/tree/Predictive_GFM_2024) using the branch `Predictive_GFM_2024`. 
 
 ### Download model ensemble 
 
