@@ -58,6 +58,49 @@ def update_ensemble(model, ft_config):
     model.model_size = len(self.model_dir_list)
     return model
 
+# def update_loss(model, ft_config):
+#     """
+#     Updates the model's loss function for MTL
+#     """
+#     losses = []
+#     for task, loss_type in ft_config["loss_function_types"]:
+#         if loss_type = 'mse':
+#             losses.append(nn.MSE())
+#         elif loss_type == 'mae':
+#             losses.append(nn.MSE())
+#         elif loss_type == 'binary':
+#         elif loss_type == 'nclass':
+    # model.loss = 
+
+# def loss_hpweighted(self, pred, value, head_index, var=None):
+#     # weights for different tasks as hyper-parameters
+#     tot_loss = 0
+#     tasks_loss = []
+#     for ihead in range(self.num_heads):
+#         head_pre = pred[ihead]
+#         pred_shape = head_pre.shape
+#         head_val = value[head_index[ihead]]
+#         value_shape = head_val.shape
+#         if pred_shape != value_shape:
+#             head_val = torch.reshape(head_val, pred_shape)
+#         if var is None:
+#             assert (
+#                 self.loss_function_type != "GaussianNLLLoss"
+#             ), "Expecting var for GaussianNLLLoss, but got None"
+#             tot_loss += (
+#                 self.loss_function(head_pre, head_val) * self.loss_weights[ihead]
+#             )
+#             tasks_loss.append(self.loss_function(head_pre, head_val))
+#         else:
+#             head_var = var[ihead]
+#             tot_loss += (
+#                 self.loss_functions[i](head_pre, head_val, head_var)
+#                 * self.loss_weights[ihead]
+#             )
+#             tasks_loss.append(self.loss_function(head_pre, head_val, head_var))
+
+#     return tot_loss, tasks_loss
+
 def update_model(model, ft_config):
     """
     Updates the given model according to the specified fine-tuning configuration.

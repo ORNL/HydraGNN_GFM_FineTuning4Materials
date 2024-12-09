@@ -117,12 +117,13 @@ def get_arc_config(config, desc):
     return arc_config
 
 
-def get_training_config():
+def get_training_config(descr):
+    loss_fun_dict = desc['graph_tasks']
     return {
         "num_epoch": 4,
         "EarlyStopping": True,
         "perc_train": 0.9,
-        "loss_function_type": "mae",
+        "loss_function_types": loss_fun_dict
         "batch_size": 32,
         "continue": 0,
         "Optimizer": {"type": "AdamW", "learning_rate": 1e-05},
@@ -149,7 +150,7 @@ def main(argv):
 
     var_config = get_var_config(config, descr)
     arc_config = get_arc_config(config, descr)
-    train_config = get_training_config()
+    train_config = get_training_config(descr)
     ft_config = {
         "NeuralNetwork": {"Architecture": config["NeuralNetwork"]["Architecture"]},
         "FTNeuralNetwork": {"Architecture": arc_config},
