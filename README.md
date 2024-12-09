@@ -13,7 +13,7 @@ The model checkpoints and config files for each member of the ensemble are organ
 Each member will be fine-tuned. 
 
 ## Data preparation
-### Generating adios dataset
+### Generating adios dataset from a CSV/parquet file
 This directory contains utilities for
 wrangling datasets into useful
 shape for HydraGNN to operate on them.
@@ -46,7 +46,9 @@ Next, import your dataset into ADIOS2 format, using
 ### Configuration
 Then create a `finetune_config.json` file describing
 the topology of your fine-tuning heads based
- on the tasks defined in the model. 
+ on the tasks defined in the model. The script `data_utils/yaml_to_config.py` 
+can be used to read the task types and generate corresponding MTL heads for the HydraGNN model. 
+Currently, the generated model is a 
 
     yaml_to_config.py <path_to_data_description>.yaml <pretrained_config>.json <data_finetuning_config>.json
 
