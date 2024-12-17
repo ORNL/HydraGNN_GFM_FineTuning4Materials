@@ -88,7 +88,7 @@ def get_var_config(config, desc):
     return var_config
 
 
-def get_arc_config(config, desc):
+def get_arc_config(desc):
     """takes pretrained config file and updates the architecture for fine-tuning
     based on desc. this is default and can be changed once the config is generated
 
@@ -118,12 +118,12 @@ def get_arc_config(config, desc):
 
 
 def get_training_config(descr):
-    loss_fun_dict = desc['graph_tasks']
+    loss_fun_dict = descr['graph_tasks']
     return {
         "num_epoch": 4,
         "EarlyStopping": True,
         "perc_train": 0.9,
-        "loss_function_types": loss_fun_dict
+        "loss_function_types": loss_fun_dict,
         "batch_size": 32,
         "continue": 0,
         "Optimizer": {"type": "AdamW", "learning_rate": 1e-05},
@@ -132,29 +132,29 @@ def get_training_config(descr):
 
 
 def main(argv):
-    assert len(argv) == 4, f"Usage: {argv[0]} <in.yaml> <pre.json> <out.json>"
+    # assert len(argv) == 4, f"Usage: {argv[0]} <in.yaml> <pre.json> <out.json>"
+    assert len(argv) == 3, f"Usage: {argv[0]} <in.yaml> <out.json>"
     inp = argv[1]
-    pre = argv[2]
-    out = argv[3]
+    out = argv[2]
 
     with open(inp, "r", encoding="utf-8") as f:
         descr = yaml.safe_load(f)
 
-    with open(pre, "r") as f:
-        config = json.load(f)
+    # with open(pre, "r") as f:
+    #     config = json.load(f)
     # smiles: IsomericSMILES
     # split: split
     # graph_tasks:
     # - { name: alcoholic, type: binary, description: 'scent label' }
     # - { name: aldehydic, type: binary, description: 'scent label' }
 
-    var_config = get_var_config(config, descr)
-    arc_config = get_arc_config(config, descr)
+    # var_config = get_var_config(config, descr)
+    arc_config = get_arc_config(descr)
     train_config = get_training_config(descr)
     ft_config = {
-        "NeuralNetwork": {"Architecture": config["NeuralNetwork"]["Architecture"]},
+#        "NeuralNetwork": {"Architecture": config["NeuralNetwork"]["Architecture"]},
         "FTNeuralNetwork": {"Architecture": arc_config},
-        "Variables_of_interest": var_config,
+#        "Variables_of_interest": var_config,
         "Training": train_config,
     }
     with open(out, "w", encoding="utf-8") as f:
