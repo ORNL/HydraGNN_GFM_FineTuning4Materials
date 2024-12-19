@@ -81,39 +81,23 @@ class model_ensemble(torch.nn.Module):
 
     def loss_and_backprop(self, data):
         ntasks = data.y.shape[1]
-        total_tasks_loss = [0] * ntasks
+        total_tasks_loss = torch.zeros(ntasks)
         for k, model in enumerate(self.model_ens):
             head_index = get_head_indices(model, data)
             pred = model(data)
             # Compute loss for the k-th model
-            loss, tasks_loss = model.module.loss(pred, data.y, head_index)
+            loss, tasks_loss = model.module.loss(pred, data.y.float(), head_index)
 
-            # Backpropagate only this model's loss
             model.zero_grad()  # Zero out gradients specific to this model
             loss.backward()  # Backpropagate for the current model
 
             # Update task-wise losses
-            total_tasks_loss = [a + b for a, b in zip(total_tasks_loss, tasks_loss)]
+            total_tasks_loss = torch.mean(total_tasks_loss + torch.Tensor(tasks_loss), dim=0)
 
         return total_tasks_loss  # Optionally return task-wise accumulated losses
 
-
-
     def __len__(self):
         return self.model_size
-
-    ##################################################################################################################
-def debug_nan(x, message=""):
-    try:
-        if torch.isnan(x).any():
-            print(f"NAN detected in prediction, after {message}: ",x)
-            return True
-    except:
-        if torch.isnan(torch.tensor(x)).any():
-            print(f"NAN detected in prediction, after {message}: ",x)
-            return True
-
-    return False
 
 def test_ens_GFM(model_ens, loader, verbosity, num_samples=None, saveresultsto=None):
     n_ens=len(model_ens.module)
@@ -229,17 +213,20 @@ def train_ensemble(model_ensemble, dataloader, num_epochs, optimizers, device="c
     for epoch in range(num_epochs):
         model_ensemble.train()  # Set ensemble to training mode
         epoch_loss = 0  # Track cumulative loss for the epoch
-        
+        counter=0 
         for batch in dataloader:
             # Forward pass and backpropagation
             total_tasks_loss = model_ensemble.module.loss_and_backprop(batch.to(get_device()))
 
+            print(total_tasks_loss)
             # Optimizer step for each ensemble member
             for optimizer in optimizers:
                 optimizer.step()
 
             # Optionally accumulate loss for logging
-            epoch_loss += sum(total_tasks_loss)
-        
+            epoch_loss += total_tasks_loss[0]
+            counter += 1
+       
+        mean_loss_epoch = epoch_loss/counter
         print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {epoch_loss:.4f}")
 

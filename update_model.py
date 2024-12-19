@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 
 
@@ -58,48 +59,77 @@ def update_ensemble(model, ft_config):
     model.model_size = len(self.model_dir_list)
     return model
 
-# def update_loss(model, ft_config):
-#     """
-#     Updates the model's loss function for MTL
-#     """
-#     losses = []
-#     for task, loss_type in ft_config["loss_function_types"]:
-#         if loss_type = 'mse':
-#             losses.append(nn.MSE())
-#         elif loss_type == 'mae':
-#             losses.append(nn.MSE())
-#         elif loss_type == 'binary':
-#         elif loss_type == 'nclass':
-    # model.loss = 
+def update_loss(model, ft_config):
+    """
+    Updates the given model losses according to the specified fine-tuning configuration.
+    only meant to work on non-ddp models.
+    Args:
+        model (nn.Module): The model to be updated for fine-tuning.
+        ft_config (dict): A configuration dictionary containing fine-tuning parameters
+                          and architectural modifications.
 
-# def loss_hpweighted(self, pred, value, head_index, var=None):
-#     # weights for different tasks as hyper-parameters
-#     tot_loss = 0
-#     tasks_loss = []
-#     for ihead in range(self.num_heads):
-#         head_pre = pred[ihead]
-#         pred_shape = head_pre.shape
-#         head_val = value[head_index[ihead]]
-#         value_shape = head_val.shape
-#         if pred_shape != value_shape:
-#             head_val = torch.reshape(head_val, pred_shape)
-#         if var is None:
-#             assert (
-#                 self.loss_function_type != "GaussianNLLLoss"
-#             ), "Expecting var for GaussianNLLLoss, but got None"
-#             tot_loss += (
-#                 self.loss_function(head_pre, head_val) * self.loss_weights[ihead]
-#             )
-#             tasks_loss.append(self.loss_function(head_pre, head_val))
-#         else:
-#             head_var = var[ihead]
-#             tot_loss += (
-#                 self.loss_functions[i](head_pre, head_val, head_var)
-#                 * self.loss_weights[ihead]
-#             )
-#             tasks_loss.append(self.loss_function(head_pre, head_val, head_var))
+    Returns:
+        nn.Module: The updated model configured for fine-tuning.
+    """
+    losses, weights = get_losses_and_weights(ft_config)
+    model.loss = lambda pred, value, head_index: generic_loss(pred, value, head_index, losses, weights)
+    return model
 
-#     return tot_loss, tasks_loss
+def generic_loss(pred, value, head_index, losses, weights):
+    tot_loss = 0
+    tasks_loss = []
+    for ihead,loss in enumerate(losses):
+        head_pre = pred[ihead]
+        pred_shape = head_pre.shape
+        head_val = value[head_index[ihead]]
+        value_shape = head_val.shape
+        # a bit dubious?
+        if pred_shape != value_shape:
+            head_val = torch.reshape(head_val, pred_shape)
+        loss_i = loss(head_pre, head_val)
+        tot_loss += (loss_i * weights[ihead]).float() 
+        tasks_loss.append(tot_loss)
+    return tot_loss, tasks_loss
+        
+def get_losses_and_weights(ft_config):
+    losses = []
+    for task, loss_type in ft_config["Training"]["loss_function_types"].items():
+        if loss_type == 'regression':
+            losses.append(nn.MSELoss())
+        elif loss_type == 'mae':
+            losses.append(nn.L1Loss())
+        elif loss_type == 'binary':
+            losses.append(nn.BCEWithLogitsLoss())
+        elif loss_type == 'categorical':
+            losses.append(nn.CrossEntropyLoss())
+    weights = torch.FloatTensor(ft_config["FTNeuralNetwork"]["Architecture"]["task_weights"] )
+    return losses, weights
+
+def update_architecture(model, ft_config):
+    """
+    Updates the given model architecture according to the specified fine-tuning configuration.
+    only meant to work on non-ddp models.
+    Args:
+        model (nn.Module): The model to be updated for fine-tuning.
+        ft_config (dict): A configuration dictionary containing fine-tuning parameters
+                          and architectural modifications.
+
+    Returns:
+        nn.Module: The updated model configured for fine-tuning.
+    """
+    device = next(model.parameters()).device
+    head_mlps = create_mlps(ft_config["FTNeuralNetwork"]["Architecture"])
+    state_dict = model.state_dict()
+    filtered_state_dict = {k: v for k, v in state_dict.items() if not k.startswith('heads_NN')}
+    model.load_state_dict(filtered_state_dict, strict=False)
+    model.heads_NN = head_mlps.to(device)
+
+    model.head_type = ft_config["FTNeuralNetwork"]["Architecture"]["output_heads"][
+        "graph"
+    ]["num_headlayers"] * ["graph"]
+    model.head_dims = ft_config["FTNeuralNetwork"]["Architecture"]["output_dim"]
+    model.num_heads = len(head_mlps)
+    return model
 
 def update_model(model, ft_config):
     """
@@ -113,31 +143,6 @@ def update_model(model, ft_config):
     Returns:
         nn.Module: The updated model configured for fine-tuning.
     """
-    device = next(model.parameters()).device
-    head_mlps = create_mlps(ft_config["FTNeuralNetwork"]["Architecture"])
-#    print(model.heads_NN)
-    # del model.heads_NN
-    # Load existing state_dict
-    state_dict = model.state_dict()
-    # Filter out keys associated with 'heads_NN'
-    filtered_state_dict = {k: v for k, v in state_dict.items() if not k.startswith('heads_NN')}
-    # Reload state_dict into the model
-    model.load_state_dict(filtered_state_dict, strict=False)
-
-    # for name, param in list(model.named_parameters()):
-    #     if name.startswith('heads_NN'):
-    #         print(f'deleting {model} {name}')
-    #         delattr(model, name)
-    # if 'heads_NN' in model._modules:
-    #     model._modules.pop('heads_NN')
-    # for name, module in model.named_modules():
-    #     print(name)
-    model.heads_NN = head_mlps.to(device)
-#    print(model.heads_NN)
-    model.head_type = ft_config["FTNeuralNetwork"]["Architecture"]["output_heads"][
-        "graph"
-    ]["num_headlayers"] * ["graph"]
-    model.head_dims = ft_config["FTNeuralNetwork"]["Architecture"]["output_dim"]
-    model.num_heads = len(head_mlps)
-
+    model = update_architecture(model, ft_config)        
+    model = update_loss(model, ft_config)
     return model
