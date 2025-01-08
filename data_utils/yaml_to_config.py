@@ -57,7 +57,7 @@ def group_features(tasks):
     return names, sizes, types
 
 
-def get_var_config(config, desc):
+def get_var_config(config, graph_tasks):
     """takes the pretrained config file and updates
     it according to the description file
 
@@ -69,11 +69,12 @@ def get_var_config(config, desc):
     Returns:
         dict: The updated configuration reflecting changes based on the description.
     """
-    group_names, group_sizes, group_type = group_features(desc["graph_tasks"])
+    print(graph_tasks)
+    group_names, group_sizes, group_type = group_features(graph_tasks)
     var_config = config["NeuralNetwork"]["Variables_of_interest"]
     # var_config["node_feature_dims"] = config["NeuralNetwork"]["Variables_of_interest"]["input_node_feature_dims"]
-    ninp = len(var_config["node_feature_dims"])
-    var_config["input_node_features"] = list(range(ninp))
+    # ninp = len(var_config["node_feature_dims"])
+    # var_config["input_node_features"] = list(range(ninp))
 
     ngrp = len(group_names)
     var_config["output_index"] = list(range(ngrp))
@@ -118,7 +119,7 @@ def get_arc_config(desc):
 
 
 def get_training_config(descr):
-    loss_fun_dict = descr['graph_tasks']
+    loss_fun_dict = descr['graph_tasks'][0]
     return {
         "num_epoch": 4,
         "EarlyStopping": True,

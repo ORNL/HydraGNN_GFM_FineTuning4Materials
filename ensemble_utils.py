@@ -19,6 +19,7 @@ from hydragnn.preprocess.load_data import HydraDataLoader
 from hydragnn.utils.model import Checkpoint, EarlyStopping
 
 import update_model as um
+import data_utils.yaml_to_config as ytc
 
 
 class model_ensemble(torch.nn.Module):
@@ -34,10 +35,11 @@ class model_ensemble(torch.nn.Module):
                 config=config["NeuralNetwork"],
                 verbosity=verbosity,
             )
+            graph_tasks = fine_tune_config["Training"]["loss_function_types"]
+            self.var_config = ytc.get_var_config(config, [graph_tasks])
             model = hydragnn.utils.get_distributed_model(model, verbosity)
             # Print details of neural network architecture
             print("Loading model %d, %s"%(imodel, modeldir))
-            print_model(model)
             if modelname is None:
                 hydragnn.utils.load_existing_model(model, os.path.basename(modeldir), path=os.path.dirname(modeldir))
             else:
@@ -47,11 +49,9 @@ class model_ensemble(torch.nn.Module):
                 model = model.module
                 model = um.update_model(model, fine_tune_config)
                 model = hydragnn.utils.get_distributed_model(model, verbosity)
-        # print('******',self.model_ens[0].head_type)
         self.num_heads = self.model_ens[0].module.num_heads
         self.head_type = self.model_ens[0].module.head_type
         self.head_dims = self.model_ens[0].module.head_dims
-        # self.loss = self.model_ens[0].module.loss
         self.model_size = len(self.model_dir_list)
 
     def forward(self, x, meanstd=False):
@@ -93,7 +93,6 @@ class model_ensemble(torch.nn.Module):
 
             # Update task-wise losses
             total_tasks_loss = torch.mean(total_tasks_loss + torch.Tensor(tasks_loss), dim=0)
-
         return total_tasks_loss  # Optionally return task-wise accumulated losses
 
     def __len__(self):
@@ -216,9 +215,8 @@ def train_ensemble(model_ensemble, dataloader, num_epochs, optimizers, device="c
         counter=0 
         for batch in dataloader:
             # Forward pass and backpropagation
-            total_tasks_loss = model_ensemble.module.loss_and_backprop(batch.to(get_device()))
+            total_tasks_loss = torch.atleast_1d(model_ensemble.module.loss_and_backprop(batch.to(get_device())))
 
-            print(total_tasks_loss)
             # Optimizer step for each ensemble member
             for optimizer in optimizers:
                 optimizer.step()

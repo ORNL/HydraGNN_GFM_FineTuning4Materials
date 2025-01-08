@@ -78,7 +78,6 @@ def run(argv):
     verbosity = 2
     model = model_ensemble([os.path.join(ensemble_path,model_id) for model_id in os.listdir(ensemble_path)], fine_tune_config=ft_config)
     model = hydragnn.utils.get_distributed_model(model, verbosity)
-    
     use_torch_backend = False  # Fix to MPI backend
     if True:  # fix to adios format
         shmem = ddstore = False
@@ -90,8 +89,9 @@ def run(argv):
             ddstore = True
             os.environ["HYDRAGNN_AGGR_BACKEND"] = "mpi"
             os.environ["HYDRAGNN_USE_ddstore"] = "1"
-
-        opt = {"preload": False, "shmem": shmem, "ddstore": ddstore, "var_config": ft_config['Variables_of_interest'] }
+        
+        # opt = {"preload": False, "shmem": shmem, "ddstore": ddstore, "var_config": ft_config['Variables_of_interest'] }
+        opt = {"preload": False, "shmem": shmem, "ddstore": ddstore, "var_config": model.module.var_config}
         comm = MPI.COMM_WORLD
         trainset = AdiosDataset(dataset, "trainset", comm, **opt)
         valset = AdiosDataset(dataset, "valset", comm)
@@ -103,15 +103,16 @@ def run(argv):
         "trainset,valset,testset size: %d %d %d"
         % (len(trainset), len(valset), len(testset))
     )
-
+    print(trainset[0].x.shape)
     # first hurdle - we need to get metadata (what features are present) from adios datasets.
     (
         train_loader,
         val_loader,
-        test_loader,
+        test_loader
     ) = hydragnn.preprocess.create_dataloaders(
         trainset, valset, testset, ft_config["Training"]["batch_size"]
     )
+
     print("Created Dataloaders")
     comm.Barrier()
 

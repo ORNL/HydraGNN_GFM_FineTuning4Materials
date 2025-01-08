@@ -212,7 +212,7 @@ def main():
         ):
             try:
                 data = generate_graphdata_from_smilestr(
-                    smilestr, ytarget, get_positions=True
+                    smilestr, ytarget, get_positions=True, pretrained=True
                 )
                 # hack to make edge_attr as the models expect.
                 data.edge_attr = (
@@ -235,7 +235,6 @@ def main():
     # this is stored with the trainset in pickle format
     # and as a global in adios format
     # config["pna_deg"] = pna_deg
-
     node_names, node_dims = get_node_attribute_name()
     node_names = [x.replace("atomicnumber", "atomic_number") for x in node_names]
     edge_names, edge_dims = get_edge_attribute_name()
