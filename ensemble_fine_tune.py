@@ -91,7 +91,7 @@ def run(argv):
             os.environ["HYDRAGNN_USE_ddstore"] = "1"
         
         # opt = {"preload": False, "shmem": shmem, "ddstore": ddstore, "var_config": ft_config['Variables_of_interest'] }
-        opt = {"preload": False, "shmem": shmem, "ddstore": ddstore, "var_config": model.module.var_config}
+        opt = {"preload": False, "shmem": shmem, "ddstore": False, "var_config": model.module.var_config}
         comm = MPI.COMM_WORLD
         trainset = AdiosDataset(dataset, "trainset", comm, **opt)
         valset = AdiosDataset(dataset, "valset", comm)
@@ -117,7 +117,9 @@ def run(argv):
     comm.Barrier()
 
     timer.stop()
-
+    for batch in train_loader:
+        print(batch[0])
+        break
     # Create optimizers for each ensemble member
     optimizers = [torch.optim.Adam(member.parameters(), lr=ft_config["Training"]["Optimizer"]["learning_rate"]) for member in model.module.model_ens]
 

@@ -33,8 +33,22 @@ from hydragnn.utils.smiles_utils import (
     get_edge_attribute_name,
     generate_graphdata_from_smilestr,
 )
+
+from hydragnn.utils.distributed import (
+    setup_ddp,
+    get_distributed_model,
+    print_peak_memory,
+)
+
 from hydragnn.preprocess.utils import gather_deg
 from hydragnn.utils import nsplit
+import hydragnn.utils.tracer as tr
+
+
+try:
+    from hydragnn.utils.adiosdataset import AdiosWriter, AdiosDataset
+except ImportError:
+    pass
 
 from models import DataDescriptor, number_categories
 
@@ -48,7 +62,6 @@ import torch_geometric.data
 import torch
 
 info = logging.info
-
 
 def random_splits(N, x, y):
     """Shuffle and sample the data indices.
@@ -179,10 +192,10 @@ def main():
         pass
     basedir.mkdir(parents=True)
 
+    # rank = comm.Get_rank()
+    # comm_size = comm.Get_size()
+    comm_size, rank = hydragnn.utils.setup_ddp()
     comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    comm_size = comm.Get_size()
-
     ## Set up logging
     logging.basicConfig(
         level=logging.INFO,

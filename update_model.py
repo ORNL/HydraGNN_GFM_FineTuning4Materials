@@ -129,6 +129,7 @@ def update_architecture(model, ft_config):
     ]["num_headlayers"] * ["graph"]
     model.head_dims = ft_config["FTNeuralNetwork"]["Architecture"]["output_dim"]
     model.num_heads = len(head_mlps)
+    print(model.heads_NN)
     return model
 
 def update_model(model, ft_config):
