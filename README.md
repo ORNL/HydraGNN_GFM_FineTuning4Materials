@@ -40,7 +40,7 @@ The format of this file is given by example:
 
 Next, import your dataset into ADIOS2 format, using
 
-    import_csv.py --input <path_to>.csv --descr <path_to_desc>.yaml --output <path/to/output>.bp
+    python import_csv.py --input ../datasets/tdc/bioavailability_ma.csv --descr ../datasets/tdc/bioavailability_ma.yaml --output ../datasets/tdc/bioavailability_ma.bp
 
 ## Fine-tuning
 ### Configuration
@@ -50,9 +50,9 @@ the topology of your fine-tuning heads based
 can be used to read the task types and generate corresponding MTL heads for the HydraGNN model. 
 Currently, the generated model is a 
 
-    yaml_to_config.py <path_to_data_description>.yaml <pretrained_config>.json <data_finetuning_config>.json
+    python yaml_to_config.py ../datasets/tdc/bioavailability_ma.yaml ../datasets/tdc/bioavailability_ma.json
 
 ### Fine-tuning 
 
-    python ensemble_fine_tune.py <path/to/ensemble> <data_finetuning_config>.json <dataset>.bp
+    python ensemble_fine_tune.py ../HydraGNN_Predictive_GFM_2024/Ensemble_of_models/ ./datasets/tdc/bioavailability_ma.json ./datasets/tdc/bioavailability_ma.json.bp
 
