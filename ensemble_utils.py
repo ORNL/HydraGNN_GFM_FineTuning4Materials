@@ -97,7 +97,7 @@ class model_ensemble(torch.nn.Module):
         return total_tasks_loss  # Optionally return task-wise accumulated losses
     
     def val_loss(self, data): 
-        ntasks = data.y.shape[0]
+        ntasks = data.y.shape[1]
         total_tasks_loss = torch.zeros(ntasks)
         for k, model in enumerate(self.model_ens):
             head_index = get_head_indices(model, data)
