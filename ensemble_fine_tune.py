@@ -94,8 +94,8 @@ def run(argv):
         opt = {"preload": False, "shmem": shmem, "ddstore": False, "var_config": model.module.var_config}
         comm = MPI.COMM_WORLD
         trainset = AdiosDataset(dataset, "trainset", comm, **opt)
-        valset = AdiosDataset(dataset, "valset", comm)
-        testset = AdiosDataset(dataset, "testset", comm)
+        valset = AdiosDataset(dataset, "valset", comm, **opt)
+        testset = AdiosDataset(dataset, "testset", comm, **opt)
         # comm.Barrier()
 
     print("Loaded dataset.")
