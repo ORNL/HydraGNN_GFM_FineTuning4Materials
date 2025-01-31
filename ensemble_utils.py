@@ -230,7 +230,6 @@ def train_ensemble(model_ensemble, train_loader, val_loader, num_epochs, optimiz
     for epoch in range(num_epochs):
         model_ensemble.train()  # Set ensemble to training mode
         epoch_loss = 0  # Track cumulative loss for the epoch
-        counter=0 
         for batch in train_loader:
             # Forward pass and backpropagation
             total_tasks_loss = torch.atleast_1d(model_ensemble.module.loss_and_backprop(batch.to(get_device())))
@@ -241,8 +240,8 @@ def train_ensemble(model_ensemble, train_loader, val_loader, num_epochs, optimiz
 
             # Optionally accumulate loss for logging
             epoch_loss += total_tasks_loss[0]
-            counter += 1
 
+        mean_train_loss_epoch = epoch_loss/len(train_loader)
 
         #validation 
         model_ensemble.eval()
@@ -253,8 +252,9 @@ def train_ensemble(model_ensemble, train_loader, val_loader, num_epochs, optimiz
 
             #accumulate validation loss for logging 
             val_loss += total_tasks_loss[0]
+
+        mean_val_loss_epoch = val_loss/len(val_loader)
     
-        mean_loss_epoch = epoch_loss/counter
-        print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {epoch_loss:.4f}, Val Loss: {val_loss:.4f}")
+        print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {mean_train_loss_epoch:.4f}, Val Loss: {mean_val_loss_epoch:.4f}")
 
 
