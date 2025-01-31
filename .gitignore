@@ -1,3 +1,5 @@
 datasets/*
+data_utils/data/*
 __pycache__/*
 data_utils/__pycache__/*
+**.DS_Store

@@ -28,12 +28,15 @@ for name in names:
         task = 'regression'
     else:
         task = 'binary'
-    df.to_parquet(name+'.parquet')
+
+    path = "../datasets/tdc/"
+    
+    df.to_csv(path+name+'.csv')
     total_num_molecules += len(df)
 
     meta = {'name':name, 'smiles':'smiles', 'graph_tasks':[{'name':name,'type':task}],
             'split':'split','source':'https://tdcommons.ai'}
-    with open(name+'.yaml','w') as f: 
+    with open(path+name+'.yaml','w') as f: 
         yaml.dump(meta, f, default_flow_style=False)
     
     print(name,task) 

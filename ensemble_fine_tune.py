@@ -91,11 +91,11 @@ def run(argv):
             os.environ["HYDRAGNN_USE_ddstore"] = "1"
         
         # opt = {"preload": False, "shmem": shmem, "ddstore": ddstore, "var_config": ft_config['Variables_of_interest'] }
-        opt = {"preload": False, "shmem": shmem, "ddstore": ddstore, "var_config": model.module.var_config}
+        opt = {"preload": False, "shmem": shmem, "ddstore": False, "var_config": model.module.var_config}
         comm = MPI.COMM_WORLD
         trainset = AdiosDataset(dataset, "trainset", comm, **opt)
-        valset = AdiosDataset(dataset, "valset", comm)
-        testset = AdiosDataset(dataset, "testset", comm)
+        valset = AdiosDataset(dataset, "valset", comm, **opt)
+        testset = AdiosDataset(dataset, "testset", comm, **opt)
         # comm.Barrier()
 
     print("Loaded dataset.")
@@ -103,7 +103,7 @@ def run(argv):
         "trainset,valset,testset size: %d %d %d"
         % (len(trainset), len(valset), len(testset))
     )
-    print(trainset[0].x.shape)
+
     # first hurdle - we need to get metadata (what features are present) from adios datasets.
     (
         train_loader,
@@ -117,12 +117,12 @@ def run(argv):
     comm.Barrier()
 
     timer.stop()
-
+    
     # Create optimizers for each ensemble member
     optimizers = [torch.optim.Adam(member.parameters(), lr=ft_config["Training"]["Optimizer"]["learning_rate"]) for member in model.module.model_ens]
 
     # Train the ensemble
-    train_ensemble(model, train_loader, num_epochs=ft_config["Training"]["num_epoch"], optimizers=optimizers, device="cuda")
+    train_ensemble(model, train_loader, val_loader, num_epochs=ft_config["Training"]["num_epoch"], optimizers=optimizers, device="cuda")
 
 
 if __name__ == "__main__":
