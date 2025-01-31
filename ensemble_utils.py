@@ -78,6 +78,7 @@ class model_ensemble(torch.nn.Module):
             total_loss += loss
             total_tasks_loss = [a + b for a, b in zip(total_tasks_loss, tasks_loss)]
         return loss, tasks_loss
+        
 
     def loss_and_backprop(self, data):
         ntasks = data.y.shape[1]
@@ -94,9 +95,26 @@ class model_ensemble(torch.nn.Module):
             # Update task-wise losses
             total_tasks_loss = torch.mean(total_tasks_loss + torch.Tensor(tasks_loss), dim=0)
         return total_tasks_loss  # Optionally return task-wise accumulated losses
+    
+    def val_loss(self, data): 
+        ntasks = data.y.shape[0]
+        total_tasks_loss = torch.zeros(ntasks)
+        for k, model in enumerate(self.model_ens):
+            head_index = get_head_indices(model, data)
+            pred = model(data)
+            # Compute loss for the k-th model
+            loss, tasks_loss = model.module.loss(pred, data.y.float(), head_index)
+
+            model.zero_grad()  # Zero out gradients specific to this model
+            
+
+            # Update task-wise losses
+            total_tasks_loss = torch.mean(total_tasks_loss + torch.Tensor(tasks_loss), dim=0)
+        return total_tasks_loss  # Optionally return task-wise accumulated losses
 
     def __len__(self):
         return self.model_size
+
 
 def test_ens_GFM(model_ens, loader, verbosity, num_samples=None, saveresultsto=None):
     n_ens=len(model_ens.module)
@@ -198,7 +216,7 @@ def get_model_directory(path_to_ensemble):
             var_config = config["NeuralNetwork"]["Variables_of_interest"]
     verbosity = config["Verbosity"]["level"]
 
-def train_ensemble(model_ensemble, dataloader, num_epochs, optimizers, device="cpu"):
+def train_ensemble(model_ensemble, train_loader, val_loader, num_epochs, optimizers, device="cpu"):
     """
     Train an ensemble of models using a custom loss_and_backprop function.
 
@@ -213,7 +231,7 @@ def train_ensemble(model_ensemble, dataloader, num_epochs, optimizers, device="c
         model_ensemble.train()  # Set ensemble to training mode
         epoch_loss = 0  # Track cumulative loss for the epoch
         counter=0 
-        for batch in dataloader:
+        for batch in train_loader:
             # Forward pass and backpropagation
             total_tasks_loss = torch.atleast_1d(model_ensemble.module.loss_and_backprop(batch.to(get_device())))
 
@@ -224,7 +242,19 @@ def train_ensemble(model_ensemble, dataloader, num_epochs, optimizers, device="c
             # Optionally accumulate loss for logging
             epoch_loss += total_tasks_loss[0]
             counter += 1
-       
+
+
+        #validation 
+        model_ensemble.eval()
+        val_loss = 0 
+        for batch in val_loader: 
+            #forward pass 
+            total_tasks_loss = torch.atleast_1d(model_ensemble.module.val_loss(batch.to(get_device())))
+
+            #accumulate validation loss for logging 
+            val_loss += total_tasks_loss[0]
+    
         mean_loss_epoch = epoch_loss/counter
-        print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {epoch_loss:.4f}")
+        print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {epoch_loss:.4f}, Val Loss: {val_loss:.4f}")
+
 

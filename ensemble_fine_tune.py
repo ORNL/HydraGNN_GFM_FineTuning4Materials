@@ -103,7 +103,7 @@ def run(argv):
         "trainset,valset,testset size: %d %d %d"
         % (len(trainset), len(valset), len(testset))
     )
-    print(trainset[0].x.shape)
+
     # first hurdle - we need to get metadata (what features are present) from adios datasets.
     (
         train_loader,
@@ -117,14 +117,12 @@ def run(argv):
     comm.Barrier()
 
     timer.stop()
-    for batch in train_loader:
-        print(batch[0])
-        break
+    
     # Create optimizers for each ensemble member
     optimizers = [torch.optim.Adam(member.parameters(), lr=ft_config["Training"]["Optimizer"]["learning_rate"]) for member in model.module.model_ens]
 
     # Train the ensemble
-    train_ensemble(model, train_loader, num_epochs=ft_config["Training"]["num_epoch"], optimizers=optimizers, device="cuda")
+    train_ensemble(model, train_loader, val_loader, num_epochs=ft_config["Training"]["num_epoch"], optimizers=optimizers, device="cuda")
 
 
 if __name__ == "__main__":
