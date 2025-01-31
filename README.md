@@ -40,7 +40,7 @@ The format of this file is given by example:
 
 Next, import your dataset into ADIOS2 format, using
 
-    python import_csv.py --input ../datasets/tdc/bioavailability_ma.csv --descr ../datasets/tdc/bioavailability_ma.yaml --output ../datasets/tdc/bioavailability_ma.bp
+    python import_data.py --input ../datasets/tdc/bioavailability_ma.csv --descr ../datasets/tdc/bioavailability_ma.yaml --output ../datasets/tdc/bioavailability_ma.bp
 
 ## Fine-tuning
 ### Configuration
