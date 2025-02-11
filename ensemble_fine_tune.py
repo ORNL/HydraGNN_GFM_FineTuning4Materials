@@ -52,7 +52,7 @@ import torch.distributed as dist
 
 # from debug_dict import DebugDict
 from update_model import update_model, update_ensemble
-from ensemble_utils import model_ensemble, train_ensemble
+from ensemble_utils import model_ensemble, train_ensemble, test_ensemble
 
 def run(argv):
     assert (
@@ -123,7 +123,8 @@ def run(argv):
 
     # Train the ensemble
     train_ensemble(model, train_loader, val_loader, num_epochs=ft_config["Training"]["num_epoch"], optimizers=optimizers, device="cuda")
-
+    #Test the ensemble
+    test_ensemble(model, test_loader, verbosity=2)
 
 if __name__ == "__main__":
     import sys
