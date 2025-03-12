@@ -41,7 +41,7 @@ class model_ensemble(torch.nn.Module):
             self.var_config = ytc.get_var_config(config, [graph_tasks])
             model = hydragnn.utils.get_distributed_model(model, verbosity)
             # Print details of neural network architecture
-            print("Loading model %d, %s"%(imodel, modeldir))
+            # print("Loading model %d, %s"%(imodel, modeldir))
             if modelname is None:
                 hydragnn.utils.load_existing_model(model, os.path.basename(modeldir), path=os.path.dirname(modeldir))
             else:
@@ -157,7 +157,7 @@ def test_ensemble(model_ens, loader, verbosity, num_samples=None):
         for imodel in range(len(model_ens.module)):
             head_all = torch.tensor(predicted_values[imodel][ihead])
             head_all = gather_tensor_ranks(head_all)
-            print("imodel %d"%imodel, head_all.size())
+            # print("imodel %d"%imodel, head_all.size())
             # if debug_nan(head_all, message="pred from model %d"%imodel):
             #     print("Warning: NAN detected in model %d; prediction skipped"%imodel)
             #     continue
@@ -170,7 +170,7 @@ def test_ensemble(model_ens, loader, verbosity, num_samples=None):
         true_values[ihead] = gather_tensor_ranks(true_values[ihead])
         predicted_mean[ihead] = head_pred_mean 
         predicted_std[ihead] = head_pred_std
-        print(head_pred_ens.size(), true_values[ihead].size())
+        # print(head_pred_ens.size(), true_values[ihead].size())
     
     #save values to pandas dataframe
     Smiles = "blank"
