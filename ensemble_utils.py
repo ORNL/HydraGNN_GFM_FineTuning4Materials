@@ -118,7 +118,7 @@ class model_ensemble(torch.nn.Module):
         return self.model_size
 
 
-def test_ensemble(model_ens, loader, verbosity, num_samples=None):
+def test_ensemble(model_ens, loader, dataset_name, verbosity, num_samples=None):
     n_ens=len(model_ens.module)
     num_heads=model_ens.module.num_heads
 
@@ -181,8 +181,9 @@ def test_ensemble(model_ens, loader, verbosity, num_samples=None):
         "True Value": t_values,
         "Predicted Value": pred_values
     })
-
-    outputs_df.to_csv("predictions.csv", index=False)
+    
+    print(f"Done testing for {dataset_name}")
+    outputs_df.to_csv(f"dataset_predictions/{dataset_name}_predictions.csv", index=False)
 
     return (
         true_values,

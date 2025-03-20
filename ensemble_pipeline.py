@@ -204,6 +204,7 @@ def training_ensemble(processed_dataset_dir, dataset_name, ensemble_path, ft_con
 
         print(f"Training dataset {dataset_name}, epoch {epoch}...")
         train_ensemble(model, train_loader, val_loader, num_epochs=1, optimizers=optimizers, device="cuda")
+        test_ensemble(model, test_loader, dataset_name, verbosity=2)
         
         save_dir = Path(model_save_dir) / dataset_name
         save_dir.mkdir(parents=True, exist_ok=True)
@@ -211,8 +212,8 @@ def training_ensemble(processed_dataset_dir, dataset_name, ensemble_path, ft_con
         if world_rank == 0:
             torch.save(model.module.state_dict(), str(checkpoint_path))
             print(f"Saved model checkpoint to {checkpoint_path}")
-
-        test_ensemble(model, test_loader, verbosity=2)
+            
+            
 
 
 def main():
