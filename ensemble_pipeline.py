@@ -10,8 +10,6 @@ import pandas as pd
 import torch
 import torch_geometric.data
 
-sys.path.append('/Users/varrunprakash/Desktop/Finetuing/GFM_FineTune/data_utils')
-
 from data_utils.models import DataDescriptor, number_categories
 from data_utils.import_data import load_columns, calc_offsets
 from data_utils.yaml_to_config import group_features, get_arc_config, get_training_config
@@ -62,7 +60,6 @@ def generate_ft_config(yaml_file, output_config_file):
     }
     with open(output_config_file, "w", encoding="utf-8") as f:
         f.write(json.dumps(ft_config, indent=2))
-    print(f"Generated fine-tuning config: {output_config_file}")
 
 
 def process_dataset(dataset_csv, dataset_yaml, output_folder):
@@ -217,11 +214,14 @@ def training_ensemble(processed_dataset_dir, dataset_name, ensemble_path, ft_con
 
 
 def main():
+    # path the ensemble of pretrained models. 
+    # ensemble_path = "/home/vxy/HydraGNN_Predictive_GFM_2024/Ensemble_of_models/"
+    ensemble_path = "/home/z6f/finetuning/HydraGNN_Predictive_GFM_2024/Ensemble_of_models"
     
-    datasets_dir = "/Users/varrunprakash/Desktop/Finetuing/GFM_FineTune/datasets/tdc"
-    processed_sets_dir = "/Users/varrunprakash/Desktop/Finetuing/GFM_FineTune/datasets/processed_sets"
-    ensemble_path = "/Users/varrunprakash/Desktop/Finetuing/HydraGNN_Predictive_GFM_2024/Ensemble_of_models"
-    model_save_dir = "/Users/varrunprakash/Desktop/Finetuing/GFM_FineTune/trained_models"
+    GFM_dir = os.path.dirname(os.path.abspath(__file__))
+    datasets_dir = os.path.join(GFM_dir,"datasets","tdc")
+    processed_sets_dir = os.path.join(GFM_dir,"datasets","processed_sets")
+    model_save_dir = os.path.join(GFM_dir,"trained_models")
 
     all_files = os.listdir(datasets_dir)
     csv_files = sorted([f for f in all_files if f.endswith(".csv")])

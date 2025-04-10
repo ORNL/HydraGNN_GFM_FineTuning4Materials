@@ -50,7 +50,7 @@ try:
 except ImportError:
     pass
 
-from models import DataDescriptor, number_categories
+from .models import DataDescriptor, number_categories
 
 
 try:
