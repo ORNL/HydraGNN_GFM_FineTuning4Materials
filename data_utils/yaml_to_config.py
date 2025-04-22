@@ -126,7 +126,7 @@ def get_training_config(descr):
         "loss_function_types": loss_fun_dict,
         "batch_size": 32,
         "continue": 0,
-        "Optimizer": {"type": "AdamW", "learning_rate": 1e-05},
+        "Optimizer": {"type": "AdamW", "learning_rate": 1e-04},
         "conv_checkpointing": False,
     }
 

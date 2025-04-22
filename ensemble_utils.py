@@ -153,7 +153,7 @@ def test_ensemble(model_ens, loader, dataset_name, verbosity, num_samples=None):
     predicted_std= [[] for _ in range(num_heads)]
     for ihead in range(num_heads):
         head_pred = []
-        print("For head %d"%ihead)
+       # print("For head %d"%ihead)
         for imodel in range(len(model_ens.module)):
             head_all = torch.tensor(predicted_values[imodel][ihead])
             head_all = gather_tensor_ranks(head_all)

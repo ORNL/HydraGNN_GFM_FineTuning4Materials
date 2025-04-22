@@ -47,7 +47,7 @@ from hydragnn.utils.adiosdataset import AdiosDataset
 logging.getLogger("hydragnn").setLevel(logging.WARNING)
 logging.getLogger("adios2").setLevel(logging.WARNING)
 
-
+#getting the new ft config files
 def generate_ft_config(yaml_file, output_config_file):
   
     with open(yaml_file, "r", encoding="utf-8") as f:
@@ -61,7 +61,7 @@ def generate_ft_config(yaml_file, output_config_file):
     with open(output_config_file, "w", encoding="utf-8") as f:
         f.write(json.dumps(ft_config, indent=2))
 
-
+#processing the datasets
 def process_dataset(dataset_csv, dataset_yaml, output_folder):
 
     dataset_name = Path(dataset_csv).stem
@@ -194,18 +194,18 @@ def training_ensemble(processed_dataset_dir, dataset_name, ensemble_path, ft_con
     
     timer.stop()
     
-    optimizers = [torch.optim.Adam(member.parameters(), lr=ft_config["Training"]["Optimizer"]["learning_rate"])
+    optimizers = [torch.optim.Adam(member.parameters(), lr=1e-4)
                   for member in model.module.model_ens]
+    trials = 1
+    for trial in range(trials):
 
-    for epoch in range(1):
-
-        print(f"Training dataset {dataset_name}, epoch {epoch}...")
-        train_ensemble(model, train_loader, val_loader, num_epochs=1, optimizers=optimizers, device="cuda")
+        print(f"Training dataset {dataset_name}, trial {trial}...")
+        train_ensemble(model, train_loader, val_loader, num_epochs=3, optimizers=optimizers, device="cuda")
         test_ensemble(model, test_loader, dataset_name, verbosity=2)
         
         save_dir = Path(model_save_dir) / dataset_name
         save_dir.mkdir(parents=True, exist_ok=True)
-        checkpoint_path = save_dir / f"model_epoch_{epoch}.pt"
+        checkpoint_path = save_dir / f"model_trial_{trial}.pt"
         if world_rank == 0:
             torch.save(model.module.state_dict(), str(checkpoint_path))
             print(f"Saved model checkpoint to {checkpoint_path}")
