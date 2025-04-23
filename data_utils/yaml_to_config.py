@@ -69,7 +69,6 @@ def get_var_config(config, graph_tasks):
     Returns:
         dict: The updated configuration reflecting changes based on the description.
     """
-    print(graph_tasks)
     group_names, group_sizes, group_type = group_features(graph_tasks)
     var_config = config["NeuralNetwork"]["Variables_of_interest"]
     # var_config["node_feature_dims"] = config["NeuralNetwork"]["Variables_of_interest"]["input_node_feature_dims"]
@@ -127,7 +126,7 @@ def get_training_config(descr):
         "loss_function_types": loss_fun_dict,
         "batch_size": 32,
         "continue": 0,
-        "Optimizer": {"type": "AdamW", "learning_rate": 1e-05},
+        "Optimizer": {"type": "AdamW", "learning_rate": 1e-04},
         "conv_checkpointing": False,
     }
 
