@@ -221,7 +221,7 @@ def main():
     GFM_dir = os.path.dirname(os.path.abspath(__file__))
     datasets_dir = os.path.join(GFM_dir,"datasets","tdc")
     processed_sets_dir = os.path.join(GFM_dir,"datasets","processed_sets")
-    model_save_dir = os.path.join(GFM_dir,"trained_models")
+    model_save_dir = os.path.join(GFM_dir, "pretrained_model_ensemble")
 
     all_files = os.listdir(datasets_dir)
     csv_files = sorted([f for f in all_files if f.endswith(".csv")])

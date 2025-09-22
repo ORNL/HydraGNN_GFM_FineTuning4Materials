@@ -7,25 +7,232 @@ from tqdm import tqdm
 import numpy as np
 import hydragnn
 from hydragnn.utils.model import print_model
-from hydragnn.utils.print_utils import log, iterate_tqdm
+from hydragnn.utils.print.print_utils import print_distributed, iterate_tqdm, log
 from hydragnn.train.train_validate_test import get_head_indices, reduce_values_ranks, gather_tensor_ranks
 
 from hydragnn.preprocess.serialized_dataset_loader import SerializedDataLoader
 from hydragnn.postprocess.postprocess import output_denormalize
 from hydragnn.postprocess.visualizer import Visualizer
-from hydragnn.utils.print_utils import print_distributed, iterate_tqdm, log
-from hydragnn.utils.time_utils import Timer
-from hydragnn.utils.profile import Profiler
-from hydragnn.utils.distributed import get_device, print_peak_memory, check_remaining
+from hydragnn.utils.print.print_utils import print_distributed, iterate_tqdm, log
+from hydragnn.utils.profiling_and_tracing.time_utils import Timer
+from hydragnn.utils.profiling_and_tracing.profile import Profiler
+from hydragnn.utils.distributed import get_device, get_device_name, print_peak_memory, check_remaining
 from hydragnn.preprocess.load_data import HydraDataLoader
-from hydragnn.utils.model import Checkpoint, EarlyStopping
+from hydragnn.utils.model.model import Checkpoint, EarlyStopping
+
+from hydragnn.preprocess.graph_samples_checks_and_updates import (
+    check_if_graph_size_variable,
+    gather_deg,
+)
+from hydragnn.utils.model.model import calculate_avg_deg
+
+from hydragnn.utils.print.print_utils import print_master
 
 import update_model as um
 import data_utils.yaml_to_config as ytc
 
+from hydragnn.utils.input_config_parsing import update_config_edge_dim, update_config_equivariance
+from hydragnn.utils.model import update_multibranch_heads
+
+def update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader):
+    for imodel, modeldir in enumerate(model_dir_list):
+        input_filename = os.path.join(modeldir, "config.json")
+        with open(input_filename, "r") as f:
+            config = json.load(f)
+
+        """check if config input consistent and update config with model and datasets"""
+        graph_size_variable = os.getenv("HYDRAGNN_USE_VARIABLE_GRAPH_SIZE")
+        if graph_size_variable is None:
+            graph_size_variable = check_if_graph_size_variable(
+                train_loader, val_loader, test_loader
+            )
+        else:
+            graph_size_variable = bool(int(graph_size_variable))
+
+        if "Dataset" in config:
+            check_output_dim_consistent(train_loader.dataset[0], config)
+
+        # Set default values for GPS variables
+        if "global_attn_engine" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["global_attn_engine"] = None
+        if "global_attn_type" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["global_attn_type"] = None
+        if "global_attn_heads" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["global_attn_heads"] = 0
+        if "pe_dim" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["pe_dim"] = 0
+
+        # update output_heads with latest config rules
+        config["NeuralNetwork"]["Architecture"]["output_heads"] = update_multibranch_heads(
+            config["NeuralNetwork"]["Architecture"]["output_heads"]
+        )
+
+        # This default is needed for update_config_NN_outputs
+        if "compute_grad_energy" not in config["NeuralNetwork"]["Training"]:
+            config["NeuralNetwork"]["Training"]["compute_grad_energy"] = False
+
+        config["NeuralNetwork"]["Architecture"]["input_dim"] = len(
+            config["NeuralNetwork"]["Variables_of_interest"]["input_node_features"]
+        )
+        PNA_models = ["PNA", "PNAPlus", "PNAEq"]
+        if config["NeuralNetwork"]["Architecture"]["mpnn_type"] in PNA_models:
+            if hasattr(train_loader.dataset, "pna_deg"):
+                ## Use max neighbours used in the datasets.
+                deg = torch.tensor(train_loader.dataset.pna_deg)
+            else:
+                deg = gather_deg(train_loader.dataset)
+            config["NeuralNetwork"]["Architecture"]["pna_deg"] = deg.tolist()
+            config["NeuralNetwork"]["Architecture"]["max_neighbours"] = len(deg) - 1
+        else:
+            config["NeuralNetwork"]["Architecture"]["pna_deg"] = None
+
+        # Set CGCNN hidden dim to input dim if global attention is not being used
+        if (
+                config["NeuralNetwork"]["Architecture"]["mpnn_type"] == "CGCNN"
+                and not config["NeuralNetwork"]["Architecture"]["global_attn_engine"]
+        ):
+            config["NeuralNetwork"]["Architecture"]["hidden_dim"] = config["NeuralNetwork"][
+                "Architecture"
+            ]["input_dim"]
+
+        if config["NeuralNetwork"]["Architecture"]["mpnn_type"] == "MACE":
+            if hasattr(train_loader.dataset, "avg_num_neighbors"):
+                ## Use avg neighbours used in the dataset.
+                avg_num_neighbors = torch.tensor(train_loader.dataset.avg_num_neighbors)
+            else:
+                avg_num_neighbors = float(calculate_avg_deg(train_loader.dataset))
+            config["NeuralNetwork"]["Architecture"]["avg_num_neighbors"] = avg_num_neighbors
+        else:
+            config["NeuralNetwork"]["Architecture"]["avg_num_neighbors"] = None
+
+        if "radius" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["radius"] = None
+        if "radial_type" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["radial_type"] = None
+        if "distance_transform" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["distance_transform"] = None
+        if "num_gaussians" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["num_gaussians"] = None
+        if "num_filters" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["num_filters"] = None
+        if "envelope_exponent" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["envelope_exponent"] = None
+        if "num_after_skip" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["num_after_skip"] = None
+        if "num_before_skip" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["num_before_skip"] = None
+        if "basis_emb_size" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["basis_emb_size"] = None
+        if "int_emb_size" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["int_emb_size"] = None
+        if "out_emb_size" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["out_emb_size"] = None
+        if "num_radial" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["num_radial"] = None
+        if "num_spherical" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["num_spherical"] = None
+        if "radial_type" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["radial_type"] = None
+        if "correlation" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["correlation"] = None
+        if "max_ell" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["max_ell"] = None
+        if "node_max_ell" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["node_max_ell"] = None
+
+        config["NeuralNetwork"]["Architecture"] = update_config_edge_dim(
+            config["NeuralNetwork"]["Architecture"]
+        )
+
+        config["NeuralNetwork"]["Architecture"] = update_config_equivariance(
+            config["NeuralNetwork"]["Architecture"]
+        )
+
+        if "freeze_conv_layers" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["freeze_conv_layers"] = False
+        if "initial_bias" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["initial_bias"] = None
+
+        if "activation_function" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["activation_function"] = "relu"
+
+        if "SyncBatchNorm" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["SyncBatchNorm"] = False
+
+        if "conv_checkpointing" not in config["NeuralNetwork"]["Training"]:
+            config["NeuralNetwork"]["Training"]["conv_checkpointing"] = False
+
+        if "loss_function_type" not in config["NeuralNetwork"]["Training"]:
+            config["NeuralNetwork"]["Training"]["loss_function_type"] = "mse"
+
+        if "Optimizer" not in config["NeuralNetwork"]["Training"]:
+            config["NeuralNetwork"]["Training"]["Optimizer"]["type"] = "AdamW"
+
+        hydragnn.utils.input_config_parsing.save_config(config, log_name="", path=modeldir)
+
+
+def update_head_string(s: str) -> str:
+    """
+    Modify strings like:
+        "module.heads_NN.0.0.weight"
+    into:
+        "module.heads_NN.0.branch-0.0.weight"
+    """
+    parts = s.split(".")
+    # Insert "branch-" before the second index
+    if len(parts) > 3:
+        parts[3] = f"branch-0.{parts[3]}"
+        return ".".join([parts[0], parts[1], parts[2], parts[3]] + parts[4:])
+    return s
+
+def update_graph_shared_string(s: str) -> str:
+    """
+    Modify strings like:
+        "module.heads_NN.0.0.weight"
+    into:
+        "module.heads_NN.0.branch-0.0.weight"
+    """
+    parts = s.split(".")
+    # Insert "branch-" before the second index
+    if len(parts) > 2:
+        parts[2] = f"branch-0.{parts[2]}"
+        return ".".join([parts[0], parts[1], parts[2], parts[3]])
+    return s
+
+
+def update_GFM_2024_checkpoint(
+    model, model_name, path="./logs/", optimizer=None, use_deepspeed=False
+):
+    """Load both model and optimizer state from a single checkpoint file, renaming head keys."""
+    path_name = os.path.join(path, model_name, model_name + ".pk")
+    map_location = {"cuda:%d" % 0: get_device_name()}
+    print_master("Load existing model:", path_name)
+
+    checkpoint = torch.load(path_name, map_location=map_location)
+    state_dict = checkpoint["model_state_dict"]
+
+    # Build a renamed copy so we don't modify while iterating
+    renamed_state_dict = {}
+    for k, v in state_dict.items():
+        if "head" in k:
+            new_k = update_head_string(k)
+        elif "graph_shared" in k:
+            new_k = update_graph_shared_string(k)
+        else:
+            new_k = k
+        renamed_state_dict[new_k] = v
+    state_dict = renamed_state_dict  # write back the updated mapping
+
+    # Load into model
+    model.load_state_dict(state_dict)
+
+    # Optionally load optimizer state
+    if (optimizer is not None) and ("optimizer_state_dict" in checkpoint):
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
 
 class model_ensemble(torch.nn.Module):
-    def __init__(self, model_dir_list, modelname=None, dir_extra="", verbosity=1, fine_tune_config = None):
+    def __init__(self, model_dir_list, modelname=None, dir_extra="", verbosity=1, fine_tune_config = None, GFM_2024=False):
         super(model_ensemble, self).__init__()
         self.model_dir_list = model_dir_list 
         self.model_ens = torch.nn.ModuleList()
@@ -37,20 +244,27 @@ class model_ensemble(torch.nn.Module):
                 config=config["NeuralNetwork"],
                 verbosity=verbosity,
             )
-            graph_tasks = fine_tune_config["Training"]["loss_function_types"]
-            self.var_config = ytc.get_var_config(config, [graph_tasks])
-            model = hydragnn.utils.get_distributed_model(model, verbosity)
+            model = hydragnn.utils.distributed.get_distributed_model(model, verbosity)
             # Print details of neural network architecture
             # print("Loading model %d, %s"%(imodel, modeldir))
             if modelname is None:
-                hydragnn.utils.load_existing_model(model, os.path.basename(modeldir), path=os.path.dirname(modeldir))
+                if not GFM_2024:
+                    hydragnn.utils.model.load_existing_model(model, os.path.basename(modeldir), path=os.path.dirname(modeldir))
+                else:
+                    update_GFM_2024_checkpoint(model, os.path.basename(modeldir), path=os.path.dirname(modeldir))
             else:
-                hydragnn.utils.load_existing_model(model, modelname, path=modeldir+dir_extra)
-            self.model_ens.append(model)
+                if not GFM_2024:
+                    hydragnn.utils.model.load_existing_model(model, modelname, path=modeldir+dir_extra)
+                else:
+                    update_GFM_2024_checkpoint(model, os.path.basename(modeldir), path=os.path.dirname(modeldir))
+
             if fine_tune_config is not None: 
                 model = model.module
                 model = um.update_model(model, fine_tune_config)
-                model = hydragnn.utils.get_distributed_model(model, verbosity)
+                model = hydragnn.utils.distributed.get_distributed_model(model, verbosity)
+
+            self.model_ens.append(model)
+
         self.num_heads = self.model_ens[0].module.num_heads
         self.head_type = self.model_ens[0].module.head_type
         self.head_dims = self.model_ens[0].module.head_dims
@@ -226,7 +440,9 @@ def train_ensemble(model_ensemble, train_loader, val_loader, num_epochs, optimiz
         optimizers: List of optimizers, one for each model in the ensemble.
         device: Device to use ("cpu" or "cuda").
     """
-    for epoch in range(num_epochs):
+    for epoch in iterate_tqdm(
+                 range(num_epochs), verbosity_level=2, desc="Train Ensemble", total=num_epochs
+        ):
         model_ensemble.train()  # Set ensemble to training mode
         epoch_loss = 0  # Track cumulative loss for the epoch
         for batch in train_loader:

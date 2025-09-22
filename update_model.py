@@ -15,30 +15,40 @@ def create_mlps(config):
     Returns:
         list of nn.Sequential: A list of head MLP modules.
     """
-    dim_pretrained = config["output_heads"]["graph"]["dim_pretrained"]
-    dim_headlayers = config["output_heads"]["graph"]["dim_headlayers"]
+
     output_dims = config["output_dim"]
 
     # Create head MLPs
     head_mlps = []
-    for head_index in range(len(output_dims)):
-        head_layers = []
-        in_dim = dim_pretrained  # Use pretrained layer dimension as input
 
-        # Create hidden layers based on dim_headlayers
-        for head_dim in dim_headlayers:
-            head_layers.append(nn.Linear(in_dim, head_dim))
-            head_layers.append(nn.ReLU())
-            in_dim = head_dim
+    for output_head_type, output_head_specs in config["output_heads"].items():
 
-        # Output layer for each head with specified output dimension
-        head_layers.append(nn.Linear(in_dim, output_dims[head_index]))
+        if output_head_type == 'node' and output_head_specs[0]['architecture']:
+            raise ValueError("Invalid input: Fine tuning for node-level prediction heads with convolutional layers not supported yet")
 
-        # Create the head MLP as a Sequential model
-        head_mlp = nn.Sequential(*head_layers)
-        head_mlps.append(head_mlp)
+        dim_pretrained = output_head_specs[0]["architecture"]["dim_pretrained"]
+        dim_headlayers = output_head_specs[0]["architecture"]["dim_headlayers"]
+
+        for head_index in range(len(output_dims)):
+            head_layers = []
+            in_dim = dim_pretrained  # Use pretrained layer dimension as input
+
+            # Create hidden layers based on dim_headlayers
+            for head_dim in dim_headlayers:
+                head_layers.append(nn.Linear(in_dim, head_dim))
+                head_layers.append(nn.ReLU())
+                in_dim = head_dim
+
+            # Output layer for each head with specified output dimension
+            head_layers.append(nn.Linear(in_dim, output_dims[head_index]))
+
+            # Create the head MLP as a Sequential model
+            head_mlp = nn.ModuleDict({})
+            head_mlp['branch-0'] = nn.Sequential(*head_layers)
+            head_mlps.append(head_mlp)
 
     return nn.ModuleList(head_mlps)
+
 
 def update_ensemble(model, ft_config):
     """
@@ -93,7 +103,7 @@ def generic_loss(pred, value, head_index, losses, weights):
         
 def get_losses_and_weights(ft_config):
     losses = []
-    for task, loss_type in ft_config["Training"]["loss_function_types"].items():
+    for loss_type in ft_config['NeuralNetwork']['Training']["loss_function_types"]:
         if loss_type == 'regression':
             losses.append(nn.MSELoss())
         elif loss_type == 'mae':
@@ -102,7 +112,7 @@ def get_losses_and_weights(ft_config):
             losses.append(nn.BCEWithLogitsLoss())
         elif loss_type == 'categorical':
             losses.append(nn.CrossEntropyLoss())
-    weights = torch.FloatTensor(ft_config["FTNeuralNetwork"]["Architecture"]["task_weights"] )
+    weights = torch.FloatTensor(ft_config['NeuralNetwork']["Architecture"]["task_weights"] )
     return losses, weights
 
 def update_architecture(model, ft_config):
@@ -118,18 +128,20 @@ def update_architecture(model, ft_config):
         nn.Module: The updated model configured for fine-tuning.
     """
     device = next(model.parameters()).device
-    head_mlps = create_mlps(ft_config["FTNeuralNetwork"]["Architecture"])
+    head_mlps = create_mlps(ft_config["NeuralNetwork"]["Architecture"])
     state_dict = model.state_dict()
     filtered_state_dict = {k: v for k, v in state_dict.items() if not k.startswith('heads_NN')}
     model.load_state_dict(filtered_state_dict, strict=False)
     model.heads_NN = head_mlps.to(device)
 
-    model.head_type = ft_config["FTNeuralNetwork"]["Architecture"]["output_heads"][
-        "graph"
-    ]["num_headlayers"] * ["graph"]
-    model.head_dims = ft_config["FTNeuralNetwork"]["Architecture"]["output_dim"]
+    model.head_type = []
+    for output_head_type, output_head_specs in ft_config["NeuralNetwork"]["Architecture"]["output_heads"].items():
+        model.head_type.append(output_head_type)
+
+    model.head_dims = ft_config["NeuralNetwork"]["Architecture"]["output_dim"]
     model.num_heads = len(head_mlps)
     print(model.heads_NN)
+
     return model
 
 def update_model(model, ft_config):
