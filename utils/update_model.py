@@ -23,7 +23,12 @@ def create_mlps(config):
 
     for output_head_type, output_head_specs in config["output_heads"].items():
 
-        if output_head_type == 'node' and output_head_specs[0]['architecture']:
+        if (
+            output_head_type == 'node'
+            and 'architecture' in output_head_specs[0]
+            and 'conv_layers' in output_head_specs[0]['architecture']
+            and output_head_specs[0]['architecture']['conv_layers']
+        ):
             raise ValueError("Invalid input: Fine tuning for node-level prediction heads with convolutional layers not supported yet")
 
         dim_pretrained = output_head_specs[0]["architecture"]["dim_pretrained"]
