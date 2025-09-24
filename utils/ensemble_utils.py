@@ -1,38 +1,58 @@
-
-import os, json, glob
-import logging
 import pandas as pd
-import torch
-from tqdm import tqdm
-import numpy as np
-import hydragnn
-from hydragnn.utils.model import print_model
-from hydragnn.utils.print.print_utils import print_distributed, iterate_tqdm, log
-from hydragnn.train.train_validate_test import get_head_indices, reduce_values_ranks, gather_tensor_ranks
 
-from hydragnn.preprocess.serialized_dataset_loader import SerializedDataLoader
-from hydragnn.postprocess.postprocess import output_denormalize
-from hydragnn.postprocess.visualizer import Visualizer
+import utils.update_model as um
+
+
+import os, json
+from pathlib import Path
+
+import logging
+import sys
+
+info = logging.info
+
+import mpi4py
+mpi4py.rc.thread_level = "serialized"
+mpi4py.rc.threads = False
+from mpi4py import MPI
+
+import argparse
+
+import hydragnn
 from hydragnn.utils.print.print_utils import print_distributed, iterate_tqdm, log
 from hydragnn.utils.profiling_and_tracing.time_utils import Timer
-from hydragnn.utils.profiling_and_tracing.profile import Profiler
 from hydragnn.utils.distributed import get_device, get_device_name, print_peak_memory, check_remaining
-from hydragnn.preprocess.load_data import HydraDataLoader
-from hydragnn.utils.model.model import Checkpoint, EarlyStopping
+from hydragnn.utils.model.model import calculate_avg_deg
+from hydragnn.utils.print.print_utils import print_master
+from hydragnn.utils.datasets.distdataset import DistDataset
+from hydragnn.utils.datasets.pickledataset import (
+    SimplePickleWriter,
+    SimplePickleDataset,
+)
+from hydragnn.utils.distributed import (
+    setup_ddp,
+    get_distributed_model,
+    print_peak_memory,
+)
+from hydragnn.utils.input_config_parsing import update_config_edge_dim, update_config_equivariance
+from hydragnn.utils.model import update_multibranch_heads
+import hydragnn.utils.profiling_and_tracing.tracer as tr
+
+from hydragnn.train.train_validate_test import get_nbatch, get_head_indices, reduce_values_ranks, gather_tensor_ranks
 
 from hydragnn.preprocess.graph_samples_checks_and_updates import (
     check_if_graph_size_variable,
     gather_deg,
 )
-from hydragnn.utils.model.model import calculate_avg_deg
 
-from hydragnn.utils.print.print_utils import print_master
+try:
+    from hydragnn.utils.adiosdataset import AdiosWriter, AdiosDataset
+except ImportError:
+    AdiosWriter = None
+    AdiosDataset = None
 
-import update_model as um
-import data_utils.yaml_to_config as ytc
+import torch
 
-from hydragnn.utils.input_config_parsing import update_config_edge_dim, update_config_equivariance
-from hydragnn.utils.model import update_multibranch_heads
 
 def update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader):
     for imodel, modeldir in enumerate(model_dir_list):
@@ -441,11 +461,14 @@ def train_ensemble(model_ensemble, train_loader, val_loader, num_epochs, optimiz
         device: Device to use ("cpu" or "cuda").
     """
     for epoch in iterate_tqdm(
-                 range(num_epochs), verbosity_level=2, desc="Train Ensemble", total=num_epochs
+                 range(num_epochs), verbosity_level=2, desc="Epoch", total=num_epochs
         ):
         model_ensemble.train()  # Set ensemble to training mode
         epoch_loss = 0  # Track cumulative loss for the epoch
-        for batch in train_loader:
+        nbatch = get_nbatch(train_loader)
+        for ibatch, batch in iterate_tqdm(
+                    enumerate(train_loader), verbosity_level=2, desc="Train Ensemble", total=nbatch
+            ):
             # Forward pass and backpropagation
             total_tasks_loss = torch.atleast_1d(model_ensemble.module.loss_and_backprop(batch.to(get_device())))
 
@@ -473,3 +496,169 @@ def train_ensemble(model_ensemble, train_loader, val_loader, num_epochs, optimiz
         print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {mean_train_loss_epoch:.4f}, Val Loss: {mean_val_loss_epoch:.4f}")
 
 
+def run_finetune(dictionary_variables, args):
+    """Main training/validation/test entry point.
+    Accepts an argparse.Namespace-like `args`.
+    """
+    # ---- tracing / timers ----
+    tr.initialize()
+    tr.disable()
+    timer = Timer("load_data")
+    timer.start()
+
+    # ---- load fine-tuning config ----
+    ftcfgfile = args.finetuning_config
+    with open(ftcfgfile, "r") as f:
+        ft_config = json.load(f)
+
+    verbosity = ft_config["Verbosity"]["level"]
+    var_config = ft_config["NeuralNetwork"]["Variables_of_interest"]
+    var_config["graph_feature_names"] = dictionary_variables['graph_feature_names']
+    var_config["graph_feature_dims"] = dictionary_variables['graph_feature_dims']
+    var_config["node_feature_names"] = dictionary_variables['node_feature_names']
+    var_config["node_feature_dims"] = dictionary_variables['node_feature_dims']
+
+    if args.batch_size is not None:
+        ft_config["NeuralNetwork"]["Training"]["batch_size"] = args.batch_size
+
+    # ---- initialize DDP / MPI ----
+    comm_size, rank = setup_ddp()
+    comm = MPI.COMM_WORLD
+
+    # ---- logging ----
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%%(levelname)s (rank %d): %%(message)s" % (rank),
+        datefmt="%H:%M:%S",
+    )
+
+    modelname = "FineTuning" if args.modelname is None else args.modelname
+    log_name = modelname
+    hydragnn.utils.print.print_utils.setup_log(log_name)
+    writer = hydragnn.utils.model.get_summary_writer(log_name)
+
+    log("Command: {0}\n".format(" ".join([x for x in sys.argv])), rank=0)
+
+    # ---- dataset loading ----
+    if args.format == "adios":
+        info("Adios load")
+        if AdiosDataset is None:
+            raise ImportError("AdiosDataset not available. Reinstall with ADIOS2 support.")
+        assert not (args.shmem and args.ddstore), "Cannot use both ddstore and shmem"
+        opt = {
+            "preload": False,
+            "shmem": args.shmem,
+            "ddstore": args.ddstore,
+            "ddstore_width": args.ddstore_width,
+        }
+        fname = os.path.join(os.path.dirname(__file__), f"./dataset/{modelname}.bp")
+        trainset = AdiosDataset(fname, "trainset", comm, **opt, var_config=var_config)
+        valset   = AdiosDataset(fname, "valset",   comm, **opt, var_config=var_config)
+        testset  = AdiosDataset(fname, "testset",  comm, **opt, var_config=var_config)
+
+    elif args.format == "pickle":
+        info("Pickle load")
+        basedir = os.path.join(os.path.dirname(__file__), "../dataset", f"{modelname}.pickle")
+        trainset = SimplePickleDataset(basedir=basedir, label="trainset", var_config=var_config)
+        valset   = SimplePickleDataset(basedir=basedir, label="valset",   var_config=var_config)
+        testset  = SimplePickleDataset(basedir=basedir, label="testset",  var_config=var_config)
+
+        pna_deg = trainset.pna_deg
+        if args.ddstore:
+            opt = {"ddstore_width": args.ddstore_width}
+            trainset = DistDataset(trainset, "trainset", comm, **opt)
+            valset   = DistDataset(valset,   "valset",   comm, **opt)
+            testset  = DistDataset(testset,  "testset",  comm, **opt)
+            trainset.pna_deg = pna_deg
+    else:
+        raise NotImplementedError(f"No supported format: {args.format}")
+
+    print("Loaded dataset.")
+    info("trainset,valset,testset size: %d %d %d" % (len(trainset), len(valset), len(testset)))
+
+    if args.ddstore:
+        os.environ["HYDRAGNN_AGGR_BACKEND"] = "mpi"
+        os.environ["HYDRAGNN_USE_ddstore"] = "1"
+
+    # ---- dataloaders ----
+    (train_loader, val_loader, test_loader) = hydragnn.preprocess.create_dataloaders(
+        trainset, valset, testset, ft_config["NeuralNetwork"]["Training"]["batch_size"]
+    )
+
+    # ---- ensemble setup ----
+    ensemble_path = Path(args.pretrained_model_ensemble_path)
+    model_dir_list = [os.path.join(ensemble_path, model_id) for model_id in os.listdir(ensemble_path)]
+    update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader)
+
+    model = model_ensemble(model_dir_list, fine_tune_config=ft_config, GFM_2024=True)
+    model = get_distributed_model(model, verbosity=2)
+
+    print("Created Dataloaders")
+    comm.Barrier()
+    timer.stop()
+
+    # ---- optimizers, train, test ----
+    optimizers = [
+        torch.optim.Adam(
+            member.parameters(),
+            lr=ft_config["NeuralNetwork"]["Training"]["Optimizer"]["learning_rate"],
+        )
+        for member in model.module.model_ens
+    ]
+
+    train_ensemble(
+        model,
+        train_loader,
+        val_loader,
+        num_epochs=ft_config["NeuralNetwork"]["Training"]["num_epoch"],
+        optimizers=optimizers,
+        device="cuda",
+    )
+
+    # Test the ensemble
+    test_ensemble(model, test_loader, modelname, verbosity=2)
+
+    # Optional: return something useful (e.g., final metrics)
+    return True
+
+
+def build_arg_parser():
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument("--ddstore", action="store_true", help="ddstore dataset")
+    parser.add_argument("--ddstore_width", type=int, help="ddstore width", default=None)
+    parser.add_argument("--shmem", action="store_true", help="shmem")
+    parser.add_argument(
+        "--pretrained_model_ensemble_path",
+        help="directory for ensemble of models",
+        type=str,
+        default="pretrained_model_ensemble",
+    )
+    parser.add_argument(
+        "--finetuning_config",
+        help="path to JSON file with configuration for fine-tunable architecture",
+        type=str,
+        default="./finetuning_config.json",
+    )
+    parser.add_argument("--log", help="log name")
+    parser.add_argument("--modelname", help="model name")
+    parser.add_argument("--batch_size", type=int, help="batch_size", default=None)
+
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--adios",
+        help="Adios dataset",
+        action="store_const",
+        dest="format",
+        const="adios",
+    )
+    group.add_argument(
+        "--pickle",
+        help="Pickle dataset",
+        action="store_const",
+        dest="format",
+        const="pickle",
+    )
+    parser.set_defaults(format="pickle")
+    return parser

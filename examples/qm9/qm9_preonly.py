@@ -46,12 +46,12 @@ transform_coordinates = Distance(norm=False, cat=False)
 def qm9_pre_transform(data):
     # Set descriptor as element type.
     data.x = torch.cat((data.z.float().view(-1, 1), data.pos), dim=1)
-    # Only predict free energy (index 10 of 19 properties) for this run.
 
-    # Overwrite one-hote encoded categorical edge features with Euclidean distance
+    # Overwrite one-hot encoded categorical edge features with Euclidean distance
     data = transform_coordinates(data)
 
-    data.y = data.y[:, 10] / len(data.x)
+    # Only predict atomization energy (index 12 of 19 properties) for this run.
+    data.y = data.y[:, 12] / len(data.x)
     return data
 
 
@@ -179,7 +179,7 @@ def main():
     ## pickle
     elif args.format == "pickle":
         basedir = os.path.join(
-            os.path.dirname(__file__), "dataset", "%s.pickle" % modelname
+            os.path.dirname(__file__), "../../dataset", "%s.pickle" % modelname
         )
         attrs = dict()
         attrs["pna_deg"] = deg

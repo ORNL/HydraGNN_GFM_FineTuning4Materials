@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+
+""" Run HydraGNN's main train/test/validate loop on the given dataset / model combination,
+    refactored so the main flow is a callable function that accepts an `args` object.
+"""
+
+from utils.ensemble_utils import build_arg_parser, run_finetune
+
+if __name__ == "__main__":
+    parser = build_arg_parser()
+    args = parser.parse_args()
+    
+    args.pretrained_model_ensemble_path = '../../pretrained_model_ensemble'
+
+    # ---- feature schema (explicit override) ----
+    graph_feature_names = ["energy"]
+    graph_feature_dims = [1]
+    node_feature_names = ["atomic_number", "cartesian_coordinates"]
+    node_feature_dims = [1, 3]
+    dictionary_variables = {}
+    dictionary_variables['graph_feature_names'] = graph_feature_names
+    dictionary_variables['graph_feature_dims'] = graph_feature_dims
+    dictionary_variables['node_feature_names'] = node_feature_names
+    dictionary_variables['node_feature_dims'] = node_feature_dims
+
+    run_finetune(dictionary_variables, args)
