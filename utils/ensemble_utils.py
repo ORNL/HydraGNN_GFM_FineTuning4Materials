@@ -214,7 +214,7 @@ def update_graph_shared_string(s: str) -> str:
     """
     parts = s.split(".")
     # Insert "branch-" before the second index
-    if len(parts) > 2:
+    if len(parts) > 3:
         parts[2] = f"branch-0.{parts[2]}"
         return ".".join([parts[0], parts[1], parts[2], parts[3]])
     return s
