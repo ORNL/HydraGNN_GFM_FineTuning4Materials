@@ -332,8 +332,8 @@ class model_ensemble(torch.nn.Module):
             loss.backward()
 
             # accumulate per-task losses (detach since it's for logging/return)
-            for total_task_loss, task_loss in zip(total_tasks_loss, tasks_loss):
-                total_task_loss += task_loss.detach().to(device)
+            for i, task_loss in enumerate(tasks_loss):
+                total_tasks_loss[i] += task_loss.detach().to(device)
 
         # if you want the ensemble average per task:
         avg_tasks_loss = total_tasks_loss / len(self.model_ens)
@@ -352,8 +352,8 @@ class model_ensemble(torch.nn.Module):
             _, tasks_loss = loss_fn_owner.loss(pred, data.y.float(), head_index)  # shape: [ntasks]
 
             # accumulate losses (detach: validation doesn’t need grads)
-            for total_task_loss, task_loss in zip(total_tasks_loss, tasks_loss):
-                total_task_loss += task_loss.detach().to(device)
+            for i, task_loss in enumerate(tasks_loss):
+                total_tasks_loss[i] += task_loss.detach().to(device)
 
         # average over ensemble
         avg_tasks_loss = total_tasks_loss / len(self.model_ens)
