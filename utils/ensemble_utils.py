@@ -199,10 +199,10 @@ def update_head_string(s: str) -> str:
         "module.heads_NN.0.branch-0.0.weight"
     """
     parts = s.split(".")
-    # Insert "branch-" before the second index
+    # Insert "branch-0" as a separate part before the second index
     if len(parts) > 3:
-        parts[3] = f"branch-0.{parts[3]}"
-        return ".".join([parts[0], parts[1], parts[2], parts[3]] + parts[4:])
+        parts.insert(3, "branch-0")
+        return ".".join(parts)
     return s
 
 def update_graph_shared_string(s: str) -> str:
