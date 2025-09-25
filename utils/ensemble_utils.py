@@ -314,39 +314,50 @@ class model_ensemble(torch.nn.Module):
             total_loss += loss
             total_tasks_loss = [a + b for a, b in zip(total_tasks_loss, tasks_loss)]
         return loss, tasks_loss
-        
 
     def loss_and_backprop(self, data):
         ntasks = data.y.shape[1]
-        total_tasks_loss = torch.zeros(ntasks)
-        for k, model in enumerate(self.model_ens):
+        device = data.y.device
+        total_tasks_loss = torch.zeros(ntasks, device=device, dtype=torch.float32)
+
+        for model in self.model_ens:
             head_index = get_head_indices(model, data)
             pred = model(data)
-            # Compute loss for the k-th model
-            loss, tasks_loss = model.module.loss(pred, data.y.float(), head_index)
 
-            model.zero_grad()  # Zero out gradients specific to this model
-            loss.backward()  # Backpropagate for the current model
+            # handle DDP-wrapped models transparently
+            loss_fn_owner = model.module if hasattr(model, "module") else model
+            loss, tasks_loss = loss_fn_owner.loss(pred, data.y.float(), head_index)  # tasks_loss shape: [ntasks]
 
-            # Update task-wise losses
-            total_tasks_loss = torch.mean(total_tasks_loss + torch.Tensor(tasks_loss), dim=0)
-        return total_tasks_loss  # Optionally return task-wise accumulated losses
-    
-    def val_loss(self, data): 
+            model.zero_grad(set_to_none=True)
+            loss.backward()
+
+            # accumulate per-task losses (detach since it's for logging/return)
+            for total_task_loss, task_loss in zip(total_tasks_loss, tasks_loss):
+                total_task_loss += task_loss.detach().to(device)
+
+        # if you want the ensemble average per task:
+        avg_tasks_loss = total_tasks_loss / len(self.model_ens)
+        return avg_tasks_loss
+
+    def val_loss(self, data):
         ntasks = data.y.shape[1]
-        total_tasks_loss = torch.zeros(ntasks)
-        for k, model in enumerate(self.model_ens):
+        device = data.y.device
+        total_tasks_loss = torch.zeros(ntasks, device=device, dtype=torch.float32)
+
+        for model in self.model_ens:
             head_index = get_head_indices(model, data)
             pred = model(data)
-            # Compute loss for the k-th model
-            loss, tasks_loss = model.module.loss(pred, data.y.float(), head_index)
 
-            model.zero_grad()  # Zero out gradients specific to this model
-            
+            loss_fn_owner = model.module if hasattr(model, "module") else model
+            _, tasks_loss = loss_fn_owner.loss(pred, data.y.float(), head_index)  # shape: [ntasks]
 
-            # Update task-wise losses
-            total_tasks_loss = torch.mean(total_tasks_loss + torch.Tensor(tasks_loss), dim=0)
-        return total_tasks_loss  # Optionally return task-wise accumulated losses
+            # accumulate losses (detach: validation doesn’t need grads)
+            for total_task_loss, task_loss in zip(total_tasks_loss, tasks_loss):
+                total_task_loss += task_loss.detach().to(device)
+
+        # average over ensemble
+        avg_tasks_loss = total_tasks_loss / len(self.model_ens)
+        return avg_tasks_loss
 
     def __len__(self):
         return self.model_size
@@ -417,7 +428,6 @@ def test_ensemble(model_ens, loader, dataset_name, verbosity, num_samples=None):
     })
     
     print(f"Done testing for {dataset_name}")
-    outputs_df.to_csv(f"dataset_predictions/{dataset_name}_predictions.csv", index=False)
 
     return (
         true_values,
