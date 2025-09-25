@@ -23,16 +23,27 @@ def create_mlps(config):
 
     for output_head_type, output_head_specs in config["output_heads"].items():
 
+        # Validate output_head_specs is a non-empty list
+        if not isinstance(output_head_specs, list) or not output_head_specs:
+            raise ValueError(f"Invalid input: output_head_specs for '{output_head_type}' must be a non-empty list")
+        head_spec = output_head_specs[0]
+        # Validate 'architecture' key exists and is a dict
+        if 'architecture' not in head_spec or not isinstance(head_spec['architecture'], dict):
+            raise ValueError(f"Invalid input: 'architecture' key missing or not a dict in output_head_specs[0] for '{output_head_type}'")
+        arch = head_spec['architecture']
+
         if (
             output_head_type == 'node'
-            and 'architecture' in output_head_specs[0]
-            and 'conv_layers' in output_head_specs[0]['architecture']
-            and output_head_specs[0]['architecture']['conv_layers']
+            and 'conv_layers' in arch
+            and arch['conv_layers']
         ):
             raise ValueError("Invalid input: Fine tuning for node-level prediction heads with convolutional layers not supported yet")
 
-        dim_pretrained = output_head_specs[0]["architecture"]["dim_pretrained"]
-        dim_headlayers = output_head_specs[0]["architecture"]["dim_headlayers"]
+        # Validate required keys in architecture
+        if 'dim_pretrained' not in arch or 'dim_headlayers' not in arch:
+            raise ValueError(f"Invalid input: 'dim_pretrained' or 'dim_headlayers' missing in architecture for '{output_head_type}'")
+        dim_pretrained = arch["dim_pretrained"]
+        dim_headlayers = arch["dim_headlayers"]
 
         for head_index in range(len(output_dims)):
             head_layers = []
