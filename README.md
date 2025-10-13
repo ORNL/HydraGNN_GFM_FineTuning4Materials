@@ -30,19 +30,26 @@ The Graph Foundation Model (GFM) ensemble is a collection of pre-trained HydraGN
 
 ### Prerequisites
 
-1. **HydraGNN**: Install the specific branch required for GFM fine-tuning:
+1. **HydraGNN**: Install the latest version from the main branch:
    ```bash
    git clone https://github.com/ORNL/HydraGNN.git
    cd HydraGNN
-   git checkout Predictive_GFM_2024
    pip install -e .
    ```
 
-2. **Python Dependencies**: Ensure you have the following packages:
-   - PyTorch and PyTorch Geometric
-   - MPI4Py
-   - ADIOS2 (for data handling)
-   - Standard scientific Python stack (numpy, pandas, etc.)
+2. **Python Dependencies**: Install the dependencies required by HydraGNN:
+   - Follow the installation instructions in the [HydraGNN repository](https://github.com/ORNL/HydraGNN)
+   - All required dependencies will be installed automatically when you install HydraGNN with `pip install -e .`
+
+3. **Environment Setup**: Update your PYTHONPATH to include both directories:
+   ```bash
+   export PYTHONPATH="${PYTHONPATH}:/path/to/HydraGNN_GFM_FineTuning4Materials:/path/to/HydraGNN"
+   ```
+   
+   Or add these lines to your `.bashrc` or `.zshrc`:
+   ```bash
+   export PYTHONPATH="${PYTHONPATH}:/path/to/HydraGNN_GFM_FineTuning4Materials:/path/to/HydraGNN"
+   ```
 
 ### Download Pre-trained Model Ensemble
 
@@ -57,6 +64,19 @@ The model ensemble contains multiple pre-trained models with their respective co
 
 ## Usage
 
+### Environment Setup
+
+**Important**: Before running any scripts, ensure your PYTHONPATH includes both the HydraGNN_GFM_FineTuning4Materials and HydraGNN directories:
+
+```bash
+# Option 1: Set temporarily for current session
+export PYTHONPATH="${PYTHONPATH}:/path/to/HydraGNN_GFM_FineTuning4Materials:/path/to/HydraGNN"
+
+# Option 2: Add to your shell profile (~/.bashrc or ~/.zshrc)
+echo 'export PYTHONPATH="${PYTHONPATH}:/path/to/HydraGNN_GFM_FineTuning4Materials:/path/to/HydraGNN"' >> ~/.bashrc
+source ~/.bashrc
+```
+
 ### Quick Start with QM9 Example
 
 1. **Navigate to the QM9 example directory**:
@@ -65,7 +85,7 @@ The model ensemble contains multiple pre-trained models with their respective co
    ```
 
 2. **Prepare your dataset** (if not using QM9):
-   - Ensure your data is in ADIOS format
+   - Prepare your data in the appropriate format
    - Update the feature schema in the fine-tuning script if needed
 
 3. **Configure fine-tuning parameters**:
@@ -118,9 +138,9 @@ For custom datasets, ensure your data includes:
 
 - **Graph Features**: Energy or other global molecular properties
 - **Node Features**: Atomic numbers, coordinates, and other atomic properties
-- **Proper Formatting**: ADIOS2 format for efficient distributed training
+- **Proper Formatting**: The framework supports various data formats depending on your use case
 
-The framework expects specific feature schemas that can be customized in the fine-tuning scripts.
+The framework expects specific feature schemas that can be customized in the fine-tuning scripts. Data format requirements may vary based on your specific dataset and configuration.
 
 ## Key Components
 
@@ -147,7 +167,7 @@ Tools for modifying model architectures:
 
 To use your own dataset:
 
-1. Prepare data in ADIOS2 format
+1. Prepare data in the appropriate format for your use case
 2. Define feature schema in your fine-tuning script
 3. Create appropriate configuration JSON
 4. Modify output heads to match your tasks
@@ -158,6 +178,29 @@ The framework supports multi-task learning scenarios:
 - Configure multiple output heads in the JSON configuration
 - Specify task weights for balanced training
 - Define different architectures for different task types
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Import Errors**: If you encounter `ModuleNotFoundError` for HydraGNN or project modules:
+   - Verify your PYTHONPATH includes both directories:
+     ```bash
+     echo $PYTHONPATH
+     ```
+   - Check that the paths are correct and the directories exist
+   - For VS Code debugging, the PYTHONPATH is automatically configured in `.vscode/launch.json`
+
+2. **Environment Variables**: Ensure you've sourced your shell profile after adding PYTHONPATH:
+   ```bash
+   source ~/.bashrc  # or ~/.zshrc
+   ```
+
+3. **Virtual Environment**: If using a virtual environment, activate it before setting PYTHONPATH:
+   ```bash
+   source .venv/bin/activate
+   export PYTHONPATH="${PYTHONPATH}:/path/to/HydraGNN_GFM_FineTuning4Materials:/path/to/HydraGNN"
+   ```
 
 ## Contributing
 
