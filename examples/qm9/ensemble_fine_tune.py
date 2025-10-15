@@ -10,7 +10,9 @@ if __name__ == "__main__":
     parser = build_arg_parser()
     args = parser.parse_args()
     
-    args.pretrained_model_ensemble_path = '../../pretrained_model_ensemble'
+    # The paths below assume that you are running this script from the root directory.
+    args.pretrained_model_ensemble_path = './pretrained_model_ensemble'
+    args.finetuning_config = './examples/qm9/finetuning_config.json'
 
     # ---- feature schema (explicit override) ----
     graph_feature_names = ["energy"]
