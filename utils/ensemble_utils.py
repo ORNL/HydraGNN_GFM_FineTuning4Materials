@@ -52,7 +52,7 @@ except ImportError:
     AdiosDataset = None
 
 import torch
-
+import glob, re
 
 def update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader):
     for imodel, modeldir in enumerate(model_dir_list):
@@ -223,13 +223,35 @@ def update_graph_shared_string(s: str) -> str:
 def update_GFM_2024_checkpoint(
     model, model_name, path="./logs/", optimizer=None, use_deepspeed=False
 ):
-    """Load both model and optimizer state from a single checkpoint file, renaming head keys."""
-    path_name = os.path.join(path, model_name, model_name + ".pk")
+    """Load both model and optimizer state from a single checkpoint file, renaming head keys.
+       If <model_name>.pk is missing, fall back to the highest <model_name>_epoch_*.pk.
+    """
+    model_dir = os.path.join(path, model_name)
+    base_pk = os.path.join(model_dir, f"{model_name}.pk")
+
+    if os.path.isfile(base_pk):
+        path_name = base_pk
+    else:
+        # pick highest epoch like <model>_epoch_XX.pk
+        candidates = glob.glob(os.path.join(model_dir, f"{model_name}_epoch_*.pk"))
+        if not candidates:
+            raise FileNotFoundError(
+                f"No checkpoints found in {model_dir}: "
+                f"expected {model_name}.pk or {model_name}_epoch_*.pk"
+            )
+
+        def _epoch_num(fn):
+            m = re.search(r"_epoch_(\d+)\.pk$", os.path.basename(fn))
+            return int(m.group(1)) if m else -1
+
+        candidates.sort(key=_epoch_num)
+        path_name = candidates[-1]
+
     map_location = {"cuda:%d" % 0: get_device_name()}
     print_master("Load existing model:", path_name)
 
     checkpoint = torch.load(path_name, map_location=map_location)
-    state_dict = checkpoint["model_state_dict"]
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
 
     # Build a renamed copy so we don't modify while iterating
     renamed_state_dict = {}
