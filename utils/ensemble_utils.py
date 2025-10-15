@@ -1,5 +1,7 @@
 import pandas as pd
+
 import utils.update_model as um
+
 
 import os, json
 from pathlib import Path
@@ -50,54 +52,15 @@ except ImportError:
     AdiosDataset = None
 
 import torch
-import glob, re  # <-- added
-
+import glob, re
 
 def update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader):
-    import os, json, torch
-
-    # --- Normalize & sanitize model_dir_list ---
-    if isinstance(model_dir_list, str):
-        root = model_dir_list
-        model_dir_list = [
-            os.path.join(root, name)
-            for name in sorted(os.listdir(root))
-            if not name.startswith(".")
-            and os.path.isdir(os.path.join(root, name))
-            and os.path.isfile(os.path.join(root, name, "config.json"))
-        ]
-    else:
-        cleaned = []
-        for d in model_dir_list:
-            name = os.path.basename(d.rstrip("/"))
-            if name.startswith("."):
-                continue
-            if not os.path.isdir(d):
-                continue
-            if not os.path.isfile(os.path.join(d, "config.json")):
-                print(f"[warn] skipping '{d}' (no config.json)")
-                continue
-            cleaned.append(d)
-        model_dir_list = sorted(cleaned)
-
-    if not model_dir_list:
-        raise RuntimeError("No valid model directories with config.json found.")
-
-    # Optional: print what we’ll use
-    print("[ensemble] using models:", *model_dir_list, sep="\n  ")
-
     for imodel, modeldir in enumerate(model_dir_list):
         input_filename = os.path.join(modeldir, "config.json")
         with open(input_filename, "r") as f:
             config = json.load(f)
 
-        # Shorthands
-        nn_cfg = config.setdefault("NeuralNetwork", {})
-        arch   = nn_cfg.setdefault("Architecture", {})
-        train  = nn_cfg.setdefault("Training", {})
-        voi    = nn_cfg.setdefault("Variables_of_interest", {})
-
-        # graph-size logic
+        """check if config input consistent and update config with model and datasets"""
         graph_size_variable = os.getenv("HYDRAGNN_USE_VARIABLE_GRAPH_SIZE")
         if graph_size_variable is None:
             graph_size_variable = check_if_graph_size_variable(
@@ -109,70 +72,121 @@ def update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader
         if "Dataset" in config:
             check_output_dim_consistent(train_loader.dataset[0], config)
 
-        # GPS defaults
-        arch.setdefault("global_attn_engine", None)
-        arch.setdefault("global_attn_type", None)
-        arch.setdefault("global_attn_heads", 0)
-        arch.setdefault("pe_dim", 0)
+        # Set default values for GPS variables
+        if "global_attn_engine" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["global_attn_engine"] = None
+        if "global_attn_type" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["global_attn_type"] = None
+        if "global_attn_heads" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["global_attn_heads"] = 0
+        if "pe_dim" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["pe_dim"] = 0
 
-        # heads normalization
-        arch["output_heads"] = update_multibranch_heads(arch.get("output_heads", {}))
+        # update output_heads with latest config rules
+        config["NeuralNetwork"]["Architecture"]["output_heads"] = update_multibranch_heads(
+            config["NeuralNetwork"]["Architecture"]["output_heads"]
+        )
 
-        # Training defaults
-        train.setdefault("compute_grad_energy", False)
-        train.setdefault("conv_checkpointing", False)
-        train.setdefault("loss_function_type", "mse")
-        # FIX: ensure Optimizer dict exists
-        if "Optimizer" not in train or not isinstance(train["Optimizer"], dict):
-            train["Optimizer"] = {"type": "AdamW"}
-        else:
-            train["Optimizer"].setdefault("type", "AdamW")
+        # This default is needed for update_config_NN_outputs
+        if "compute_grad_energy" not in config["NeuralNetwork"]["Training"]:
+            config["NeuralNetwork"]["Training"]["compute_grad_energy"] = False
 
-        # input_dim from VOI
-        arch["input_dim"] = len(voi.get("input_node_features", []))
-
-        # PNA specifics
+        config["NeuralNetwork"]["Architecture"]["input_dim"] = len(
+            config["NeuralNetwork"]["Variables_of_interest"]["input_node_features"]
+        )
         PNA_models = ["PNA", "PNAPlus", "PNAEq"]
-        if arch.get("mpnn_type") in PNA_models:
+        if config["NeuralNetwork"]["Architecture"]["mpnn_type"] in PNA_models:
             if hasattr(train_loader.dataset, "pna_deg"):
+                ## Use max neighbours used in the datasets.
                 deg = torch.tensor(train_loader.dataset.pna_deg)
             else:
                 deg = gather_deg(train_loader.dataset)
-            arch["pna_deg"] = deg.tolist()
-            arch["max_neighbours"] = len(deg) - 1
+            config["NeuralNetwork"]["Architecture"]["pna_deg"] = deg.tolist()
+            config["NeuralNetwork"]["Architecture"]["max_neighbours"] = len(deg) - 1
         else:
-            arch["pna_deg"] = None
+            config["NeuralNetwork"]["Architecture"]["pna_deg"] = None
 
-        # CGCNN default hidden dim if no global attn
-        if arch.get("mpnn_type") == "CGCNN" and not arch.get("global_attn_engine"):
-            arch["hidden_dim"] = arch["input_dim"]
+        # Set CGCNN hidden dim to input dim if global attention is not being used
+        if (
+                config["NeuralNetwork"]["Architecture"]["mpnn_type"] == "CGCNN"
+                and not config["NeuralNetwork"]["Architecture"]["global_attn_engine"]
+        ):
+            config["NeuralNetwork"]["Architecture"]["hidden_dim"] = config["NeuralNetwork"][
+                "Architecture"
+            ]["input_dim"]
 
-        # MACE specifics
-        if arch.get("mpnn_type") == "MACE":
+        if config["NeuralNetwork"]["Architecture"]["mpnn_type"] == "MACE":
             if hasattr(train_loader.dataset, "avg_num_neighbors"):
+                ## Use avg neighbours used in the dataset.
                 avg_num_neighbors = torch.tensor(train_loader.dataset.avg_num_neighbors)
             else:
                 avg_num_neighbors = float(calculate_avg_deg(train_loader.dataset))
-            arch["avg_num_neighbors"] = avg_num_neighbors
+            config["NeuralNetwork"]["Architecture"]["avg_num_neighbors"] = avg_num_neighbors
         else:
-            arch["avg_num_neighbors"] = None
+            config["NeuralNetwork"]["Architecture"]["avg_num_neighbors"] = None
 
-        # fill misc defaults
-        for k, default in [
-            ("radius", None), ("radial_type", None), ("distance_transform", None),
-            ("num_gaussians", None), ("num_filters", None), ("envelope_exponent", None),
-            ("num_after_skip", None), ("num_before_skip", None), ("basis_emb_size", None),
-            ("int_emb_size", None), ("out_emb_size", None), ("num_radial", None),
-            ("num_spherical", None), ("correlation", None), ("max_ell", None),
-            ("node_max_ell", None), ("freeze_conv_layers", False),
-            ("initial_bias", None), ("activation_function", "relu"),
-            ("SyncBatchNorm", False),
-        ]:
-            arch.setdefault(k, default)
+        if "radius" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["radius"] = None
+        if "radial_type" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["radial_type"] = None
+        if "distance_transform" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["distance_transform"] = None
+        if "num_gaussians" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["num_gaussians"] = None
+        if "num_filters" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["num_filters"] = None
+        if "envelope_exponent" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["envelope_exponent"] = None
+        if "num_after_skip" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["num_after_skip"] = None
+        if "num_before_skip" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["num_before_skip"] = None
+        if "basis_emb_size" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["basis_emb_size"] = None
+        if "int_emb_size" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["int_emb_size"] = None
+        if "out_emb_size" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["out_emb_size"] = None
+        if "num_radial" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["num_radial"] = None
+        if "num_spherical" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["num_spherical"] = None
+        if "radial_type" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["radial_type"] = None
+        if "correlation" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["correlation"] = None
+        if "max_ell" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["max_ell"] = None
+        if "node_max_ell" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["node_max_ell"] = None
 
-        # edge-dim + equivariance normalization
-        arch = update_config_edge_dim(arch)
-        arch = update_config_equivariance(arch)
+        config["NeuralNetwork"]["Architecture"] = update_config_edge_dim(
+            config["NeuralNetwork"]["Architecture"]
+        )
+
+        config["NeuralNetwork"]["Architecture"] = update_config_equivariance(
+            config["NeuralNetwork"]["Architecture"]
+        )
+
+        if "freeze_conv_layers" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["freeze_conv_layers"] = False
+        if "initial_bias" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["initial_bias"] = None
+
+        if "activation_function" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["activation_function"] = "relu"
+
+        if "SyncBatchNorm" not in config["NeuralNetwork"]["Architecture"]:
+            config["NeuralNetwork"]["Architecture"]["SyncBatchNorm"] = False
+
+        if "conv_checkpointing" not in config["NeuralNetwork"]["Training"]:
+            config["NeuralNetwork"]["Training"]["conv_checkpointing"] = False
+
+        if "loss_function_type" not in config["NeuralNetwork"]["Training"]:
+            config["NeuralNetwork"]["Training"]["loss_function_type"] = "mse"
+
+        if "Optimizer" not in config["NeuralNetwork"]["Training"]:
+            config["NeuralNetwork"]["Training"]["Optimizer"]["type"] = "AdamW"
 
         hydragnn.utils.input_config_parsing.save_config(config, log_name="", path=modeldir)
 
@@ -615,7 +629,6 @@ def run_finetune(dictionary_variables, args):
     comm.Barrier()
     timer.stop()
 
-    
     # ---- optimizers, train, test ----
     optimizers = [
         torch.optim.Adam(
@@ -624,8 +637,6 @@ def run_finetune(dictionary_variables, args):
         )
         for member in model.module.model_ens
     ]
-
-
 
     train_ensemble(
         model,
