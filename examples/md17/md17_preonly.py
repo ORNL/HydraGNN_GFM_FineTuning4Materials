@@ -27,8 +27,6 @@ except ImportError:
 
 log = logging.getLogger(__name__).info
 
-# ----------------------------- Pre/Transform helpers -----------------------------
-# Distance transform to ensure data.edge_attr exists (||x_i - x_j||, shape [E,1])
 dist_transform = Distance(norm=False, cat=False)
 
 def md17_pre_transform(data, compute_edges, pe_transform):
