@@ -5,6 +5,8 @@
 """
 
 from utils.ensemble_utils import build_arg_parser, run_finetune
+import os
+from pathlib import Path
 
 if __name__ == "__main__":
     parser = build_arg_parser()
@@ -13,6 +15,12 @@ if __name__ == "__main__":
     # The paths below assume that you are running this script from the root directory.
     args.pretrained_model_ensemble_path = './pretrained_model_ensemble'
     args.finetuning_config = './examples/qm9/finetuning_config.json'
+    args.datasetname = 'qm9'
+    args.modelname = 'qm9'
+
+    # Place all logs/checkpoints under the example folder
+    example_dir = Path(__file__).parent
+    os.environ["FINETUNING_LOG_DIR"] = str(example_dir / "logs")
 
     # ---- feature schema (explicit override) ----
     graph_feature_names = ["energy"]

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from pathlib import Path
+import os
 import json
 
 from utils.ensemble_utils import build_arg_parser, run_finetune
@@ -70,6 +71,9 @@ if __name__ == "__main__":
         "node_feature_names": ["atomic_number", "cartesian_coordinates"],
         "node_feature_dims": [1, 3],
     }
+
+    # Place all logs/checkpoints under the example folder
+    os.environ["FINETUNING_LOG_DIR"] = str(here / "logs")
 
     print(f"[MS25] system={system} radius={radius} max_neighbours={max_nbrs}")
     print(f"[MS25] config={args.finetuning_config}")
