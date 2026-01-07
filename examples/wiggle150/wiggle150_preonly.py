@@ -34,6 +34,7 @@ except ImportError:
     AdiosWriter = None
 
 WIGGLE150_URL = "https://pubs.acs.org/doi/suppl/10.1021/acs.jctc.5c00015/suppl_file/ct5c00015_si_003.xyz"
+# Default to ../datasets/wiggle150/raw at repo root
 RAW_DATASET_DIR = Path(__file__).resolve().parents[2] / "dataset" / "wiggle150" / "raw"
 RAW_XYZ_PATH = RAW_DATASET_DIR / "wiggle150.xyz"
 RADIUS_CUTOFF = 6.0
@@ -101,6 +102,13 @@ def download_wiggle150_xyz(url=WIGGLE150_URL, out_path=RAW_XYZ_PATH):
     existing_xyz = list(RAW_DATASET_DIR.glob("*.xyz"))
     if existing_xyz:
         return existing_xyz[0]
+
+    # Fallback: repository-level dataset directory (singular) that may already contain the file
+    alt_dir = Path(__file__).resolve().parents[2] / "dataset" / "wiggle150" / "raw"
+    alt_xyz = list(alt_dir.glob("*.xyz"))
+    if alt_xyz:
+        info(f"Found local wiggle150 data at {alt_xyz[0]}")
+        return alt_xyz[0]
 
     # Allow overriding URL via env for mirrors
     final_url = os.environ.get("WIGGLE150_URL", url)
@@ -223,6 +231,19 @@ def main():
     )
 
     parser.add_argument(
+        "--xyz_path",
+        help="Path to a local wiggle150 XYZ file. If provided and exists, download is skipped.",
+        type=str,
+        default=None,
+    )
+
+    parser.add_argument(
+        "--force_rebuild",
+        help="Force rebuilding pickles even if they already exist.",
+        action="store_true",
+    )
+
+    parser.add_argument(
         "--finetuning_config", help="path to JSON file with configuration for fine-tunable architecture", type=str,
         default="./finetuning_config.json"
     )
@@ -296,8 +317,24 @@ def main():
     # Enable print to log file.
     hydragnn.utils.print.print_utils.setup_log(log_name)
 
-    download_url = args.dataset_url if args.dataset_url else WIGGLE150_URL
-    raw_xyz = download_wiggle150_xyz(url=download_url)
+    # If pickled dataset already exists and rebuild not forced, skip processing
+    pickle_base = os.path.join(
+        os.path.dirname(__file__), "../../dataset", f"{modelname}.pickle"
+    )
+    if (not args.force_rebuild) and os.path.isdir(pickle_base):
+        has_train = os.path.isdir(os.path.join(pickle_base, "trainset"))
+        has_val = os.path.isdir(os.path.join(pickle_base, "valset"))
+        has_test = os.path.isdir(os.path.join(pickle_base, "testset"))
+        if has_train and has_val and has_test:
+            info(f"Found existing pickled dataset at {pickle_base}; skipping download and rebuild.")
+            sys.exit(0)
+
+    # Resolve raw XYZ path: prefer explicit local path, else download (with optional URL override)
+    if args.xyz_path and os.path.isfile(args.xyz_path):
+        raw_xyz = Path(args.xyz_path)
+    else:
+        download_url = args.dataset_url if args.dataset_url else WIGGLE150_URL
+        raw_xyz = download_wiggle150_xyz(url=download_url)
     dataset = load_wiggle150_xyz(raw_xyz)
     dataset = apply_graph_transforms(dataset)
 
