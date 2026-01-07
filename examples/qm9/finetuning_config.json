@@ -39,7 +39,8 @@
             "denormalize_output": false
         },
         "Training": {
-            "num_epoch": 10,
+            "Checkpoint" : true,
+            "num_epoch": 100,
             "perc_train": 0.7,
             "loss_function_types": ["mae"],
             "batch_size": 32,

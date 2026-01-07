@@ -78,7 +78,8 @@ def main():
         default="./finetuning_config.json"
     )
     parser.add_argument("--log", help="log name")
-    parser.add_argument("--modelname", help="model name")
+    parser.add_argument("--datasetname", help="dataset name", default="qm9")
+    parser.add_argument("--modelname", help="model name", default="qm9")
 
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
@@ -114,6 +115,7 @@ def main():
 
     # Always initialize for multi-rank training.
     world_size, world_rank = hydragnn.utils.distributed.setup_ddp()
+    datasetname = "FineTuning" if args.datasetname is None else args.datasetname
     modelname = "FineTuning" if args.modelname is None else args.modelname
 
     # Configurable run choices (JSON file that accompanies this example script).
@@ -165,7 +167,7 @@ def main():
     ## adios
     if args.format == "adios":
         fname = os.path.join(
-            os.path.dirname(__file__), "./dataset/%s.bp" % modelname
+            os.path.dirname(__file__), "./dataset/%s.bp" % datasetname
         )
         adwriter = AdiosWriter(fname, comm)
         adwriter.add("trainset", trainset)
@@ -179,7 +181,7 @@ def main():
     ## pickle
     elif args.format == "pickle":
         basedir = os.path.join(
-            os.path.dirname(__file__), "../../dataset", "%s.pickle" % modelname
+            os.path.dirname(__file__), "../../dataset", "%s.pickle" % datasetname
         )
         attrs = dict()
         attrs["pna_deg"] = deg

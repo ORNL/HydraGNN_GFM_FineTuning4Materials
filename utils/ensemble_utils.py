@@ -22,7 +22,7 @@ import hydragnn
 from hydragnn.utils.print.print_utils import print_distributed, iterate_tqdm, log
 from hydragnn.utils.profiling_and_tracing.time_utils import Timer
 from hydragnn.utils.distributed import get_device, get_device_name, print_peak_memory, check_remaining
-from hydragnn.utils.model.model import calculate_avg_deg
+from hydragnn.utils.model.model import calculate_avg_deg, Checkpoint
 from hydragnn.utils.print.print_utils import print_master
 from hydragnn.utils.datasets.distdataset import DistDataset
 from hydragnn.utils.datasets.pickledataset import (
@@ -481,7 +481,7 @@ def get_model_directory(path_to_ensemble):
             var_config = config["NeuralNetwork"]["Variables_of_interest"]
     verbosity = config["Verbosity"]["level"]
 
-def train_ensemble(model_ensemble, train_loader, val_loader, num_epochs, optimizers, device="cpu"):
+def train_ensemble(model_ensemble, train_loader, val_loader, num_epochs, optimizers, device="cpu", member_checkpoints=None):
     """
     Train an ensemble of models using a custom loss_and_backprop function.
 
@@ -495,6 +495,8 @@ def train_ensemble(model_ensemble, train_loader, val_loader, num_epochs, optimiz
     for epoch in iterate_tqdm(
                  range(num_epochs), verbosity_level=2, desc="Epoch", total=num_epochs
         ):
+        # expose epoch to checkpoint file naming
+        os.environ["HYDRAGNN_EPOCH"] = str(epoch)
         model_ensemble.train()  # Set ensemble to training mode
         epoch_loss = 0  # Track cumulative loss for the epoch
         nbatch = get_nbatch(train_loader)
@@ -527,6 +529,14 @@ def train_ensemble(model_ensemble, train_loader, val_loader, num_epochs, optimiz
     
         print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {mean_train_loss_epoch:.4f}, Val Loss: {mean_val_loss_epoch:.4f}")
 
+        # checkpoint each fine-tuned member when validation improves
+        if member_checkpoints:
+            perf = float(mean_val_loss_epoch.detach().cpu())
+            for i, cp in enumerate(member_checkpoints):
+                if cp(model_ensemble.module.model_ens[i], optimizers[i], perf):
+                    print_master("Creating Checkpoint: %f" % cp.min_perf_metric)
+                print_master("Best Performance Metric: %f" % cp.min_perf_metric)
+
 
 def run_finetune(dictionary_variables, args):
     """Main training/validation/test entry point.
@@ -542,6 +552,17 @@ def run_finetune(dictionary_variables, args):
     ftcfgfile = args.finetuning_config
     with open(ftcfgfile, "r") as f:
         ft_config = json.load(f)
+
+    # ---- default FINETUNING_LOG_DIR if not set ----
+    finetuning_log_dir = os.getenv("FINETUNING_LOG_DIR")
+    if not finetuning_log_dir:
+        try:
+            example_dir = Path(os.path.abspath(ftcfgfile)).parent
+            finetuning_log_dir = str(example_dir / "logs")
+        except Exception:
+            finetuning_log_dir = "./logs"
+        os.environ["FINETUNING_LOG_DIR"] = finetuning_log_dir
+    os.makedirs(finetuning_log_dir, exist_ok=True)
 
     verbosity = ft_config["Verbosity"]["level"]
     var_config = ft_config["NeuralNetwork"]["Variables_of_interest"]
@@ -564,8 +585,8 @@ def run_finetune(dictionary_variables, args):
         datefmt="%H:%M:%S",
     )
 
+    datasetname = "FineTuning" if args.datasetname is None else args.datasetname
     modelname = "FineTuning" if args.modelname is None else args.modelname
-    dataset_name = "FineTuning" if args.dataset_name is None else args.dataset_name
     log_name = modelname
     hydragnn.utils.print.print_utils.setup_log(log_name)
     writer = hydragnn.utils.model.get_summary_writer(log_name)
@@ -584,14 +605,14 @@ def run_finetune(dictionary_variables, args):
             "ddstore": args.ddstore,
             "ddstore_width": args.ddstore_width,
         }
-        fname = os.path.join(os.path.dirname(__file__), f"./dataset/{dataset_name}.bp")
+        fname = os.path.join(os.path.dirname(__file__), f"./dataset/{datasetname}.bp")
         trainset = AdiosDataset(fname, "trainset", comm, **opt, var_config=var_config)
         valset   = AdiosDataset(fname, "valset",   comm, **opt, var_config=var_config)
         testset  = AdiosDataset(fname, "testset",  comm, **opt, var_config=var_config)
 
     elif args.format == "pickle":
         info("Pickle load")
-        basedir = os.path.join(os.path.dirname(__file__), "../dataset", f"{dataset_name}.pickle")
+        basedir = os.path.join(os.path.dirname(__file__), "../dataset", f"{datasetname}.pickle")
         trainset = SimplePickleDataset(basedir=basedir, label="trainset", var_config=var_config)
         valset   = SimplePickleDataset(basedir=basedir, label="valset",   var_config=var_config)
         testset  = SimplePickleDataset(basedir=basedir, label="testset",  var_config=var_config)
@@ -612,8 +633,6 @@ def run_finetune(dictionary_variables, args):
     if args.ddstore:
         os.environ["HYDRAGNN_AGGR_BACKEND"] = "mpi"
         os.environ["HYDRAGNN_USE_ddstore"] = "1"
-
-    # ---- dataloaders ----
     (train_loader, val_loader, test_loader) = hydragnn.preprocess.create_dataloaders(
         trainset, valset, testset, ft_config["NeuralNetwork"]["Training"]["batch_size"]
     )
@@ -630,7 +649,7 @@ def run_finetune(dictionary_variables, args):
     comm.Barrier()
     timer.stop()
 
-    # ---- optimizers, train, test ----
+    # ---- optimizers, checkpoints, train, test ----
     optimizers = [
         torch.optim.Adam(
             member.parameters(),
@@ -639,6 +658,25 @@ def run_finetune(dictionary_variables, args):
         for member in model.module.model_ens
     ]
 
+    # Prepare per-member checkpoints if enabled
+    member_checkpoints = None
+    try:
+        save_ckpt = ft_config["NeuralNetwork"]["Training"].get("Checkpoint", False)
+    except Exception:
+        save_ckpt = False
+    if save_ckpt:
+        warmup = ft_config["NeuralNetwork"]["Training"].get("checkpoint_warmup", 0)
+        member_checkpoints = []
+        for idx, _ in enumerate(model.module.model_ens):
+            # Use the original pretrained model directory name
+            member_name = os.path.basename(model_dir_list[idx])
+            # ensure log directory exists for this member under configured logs root
+            base_dir = os.getenv("FINETUNING_LOG_DIR", os.getenv("HYDRAGNN_LOG_DIR", "./logs"))
+            os.makedirs(os.path.join(base_dir, member_name), exist_ok=True)
+            member_checkpoints.append(
+                Checkpoint(name=member_name, warmup=warmup, use_deepspeed=False)
+            )
+
     train_ensemble(
         model,
         train_loader,
@@ -646,6 +684,7 @@ def run_finetune(dictionary_variables, args):
         num_epochs=ft_config["NeuralNetwork"]["Training"]["num_epoch"],
         optimizers=optimizers,
         device="cuda",
+        member_checkpoints=member_checkpoints,
     )
 
     # Test the ensemble
@@ -675,7 +714,7 @@ def build_arg_parser():
         default="./finetuning_config.json",
     )
     parser.add_argument("--log", help="log name")
-    parser.add_argument("--dataset_name", help="dataset name")
+    parser.add_argument("--datasetname", help="dataset name")
     parser.add_argument("--modelname", help="model name")
     parser.add_argument("--batch_size", type=int, help="batch_size", default=None)
 
