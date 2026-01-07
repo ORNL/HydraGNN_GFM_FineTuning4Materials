@@ -565,6 +565,7 @@ def run_finetune(dictionary_variables, args):
     )
 
     modelname = "FineTuning" if args.modelname is None else args.modelname
+    dataset_name = "FineTuning" if args.dataset_name is None else args.dataset_name
     log_name = modelname
     hydragnn.utils.print.print_utils.setup_log(log_name)
     writer = hydragnn.utils.model.get_summary_writer(log_name)
@@ -583,14 +584,14 @@ def run_finetune(dictionary_variables, args):
             "ddstore": args.ddstore,
             "ddstore_width": args.ddstore_width,
         }
-        fname = os.path.join(os.path.dirname(__file__), f"./dataset/{modelname}.bp")
+        fname = os.path.join(os.path.dirname(__file__), f"./dataset/{dataset_name}.bp")
         trainset = AdiosDataset(fname, "trainset", comm, **opt, var_config=var_config)
         valset   = AdiosDataset(fname, "valset",   comm, **opt, var_config=var_config)
         testset  = AdiosDataset(fname, "testset",  comm, **opt, var_config=var_config)
 
     elif args.format == "pickle":
         info("Pickle load")
-        basedir = os.path.join(os.path.dirname(__file__), "../dataset", f"{modelname}.pickle")
+        basedir = os.path.join(os.path.dirname(__file__), "../dataset", f"{dataset_name}.pickle")
         trainset = SimplePickleDataset(basedir=basedir, label="trainset", var_config=var_config)
         valset   = SimplePickleDataset(basedir=basedir, label="valset",   var_config=var_config)
         testset  = SimplePickleDataset(basedir=basedir, label="testset",  var_config=var_config)
@@ -674,6 +675,7 @@ def build_arg_parser():
         default="./finetuning_config.json",
     )
     parser.add_argument("--log", help="log name")
+    parser.add_argument("--dataset_name", help="dataset name")
     parser.add_argument("--modelname", help="model name")
     parser.add_argument("--batch_size", type=int, help="batch_size", default=None)
 
