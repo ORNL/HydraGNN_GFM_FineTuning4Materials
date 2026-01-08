@@ -15,6 +15,8 @@ if __name__ == "__main__":
     # The paths below assume that you are running this script from the root directory.
     args.pretrained_model_ensemble_path = './pretrained_model_ensemble'
     args.finetuning_config = './examples/md17/finetuning_config.json'
+    args.datasetname = 'md17'
+    args.modelname = 'md17'
 
     # Place all logs/checkpoints under the example folder
     example_dir = Path(__file__).parent

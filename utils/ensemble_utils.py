@@ -589,7 +589,7 @@ def run_finetune(dictionary_variables, args):
     modelname = "FineTuning" if args.modelname is None else args.modelname
     log_name = modelname
     hydragnn.utils.print.print_utils.setup_log(log_name)
-    writer = hydragnn.utils.model.get_summary_writer(log_name)
+    writer = hydragnn.utils.model.get_summary_writer(log_name, path=finetuning_log_dir)
 
     log("Command: {0}\n".format(" ".join([x for x in sys.argv])), rank=0)
 
@@ -671,10 +671,14 @@ def run_finetune(dictionary_variables, args):
             # Use the original pretrained model directory name
             member_name = os.path.basename(model_dir_list[idx])
             # ensure log directory exists for this member under configured logs root
-            base_dir = os.getenv("FINETUNING_LOG_DIR", os.getenv("HYDRAGNN_LOG_DIR", "./logs"))
-            os.makedirs(os.path.join(base_dir, member_name), exist_ok=True)
+            os.makedirs(os.path.join(finetuning_log_dir, member_name), exist_ok=True)
             member_checkpoints.append(
-                Checkpoint(name=member_name, warmup=warmup, use_deepspeed=False)
+                Checkpoint(
+                    name=member_name,
+                    warmup=warmup,
+                    path=finetuning_log_dir,
+                    use_deepspeed=False,
+                )
             )
 
     train_ensemble(
