@@ -76,7 +76,8 @@ def main():
         default="./finetuning_config.json",
     )
     parser.add_argument("--log", help="log name")
-    parser.add_argument("--modelname", help="model name")
+    parser.add_argument("--datasetname", help="dataset name", default="md17")
+    parser.add_argument("--modelname", help="model name", default="md17")
 
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
@@ -104,7 +105,7 @@ def main():
     comm = MPI.COMM_WORLD
     # OK if called twice in this codebase
     world_size, world_rank = hydragnn.utils.distributed.setup_ddp()
-
+    datasetname = "FineTuning" if args.datasetname is None else args.datasetname
     modelname = "FineTuning" if args.modelname is None else args.modelname
 
     # Load finetuning config (use the file adjacent to this script if not overridden)
@@ -170,7 +171,7 @@ def main():
     if args.format == "adios":
         if AdiosWriter is None:
             raise ImportError("ADIOS support not available. Install hydragnn adios deps.")
-        fname = os.path.join(os.path.dirname(__file__), "./dataset/%s.bp" % modelname)
+        fname = os.path.join(os.path.dirname(__file__), "./dataset/%s.bp" % datasetname)
         adwriter = AdiosWriter(fname, comm)
         adwriter.add("trainset", trainset)
         adwriter.add("valset", valset)
@@ -179,7 +180,7 @@ def main():
         adwriter.save()
 
     elif args.format == "pickle":
-        basedir = os.path.join(os.path.dirname(__file__), "../../dataset", "%s.pickle" % modelname)
+        basedir = os.path.join(os.path.dirname(__file__), "../../dataset", "%s.pickle" % datasetname)
         attrs = {"pna_deg": deg}
         SimplePickleWriter(trainset, basedir, "trainset", use_subdir=True, attrs=attrs)
         SimplePickleWriter(valset,   basedir, "valset",   use_subdir=True)
