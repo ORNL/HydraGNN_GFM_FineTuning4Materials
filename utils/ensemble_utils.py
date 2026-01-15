@@ -588,7 +588,7 @@ def run_finetune(dictionary_variables, args):
     datasetname = "FineTuning" if args.datasetname is None else args.datasetname
     modelname = "FineTuning" if args.modelname is None else args.modelname
     log_name = modelname
-    hydragnn.utils.print.print_utils.setup_log(log_name, path=finetuning_log_dir)
+    hydragnn.utils.print.print_utils.setup_log(log_name)
     writer = hydragnn.utils.model.get_summary_writer(log_name, path=finetuning_log_dir)
 
     log("Command: {0}\n".format(" ".join([x for x in sys.argv])), rank=0)
