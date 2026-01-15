@@ -10,7 +10,7 @@ from pathlib import Path
 import torch
 import torch_geometric
 from mpi4py import MPI
-from torch_geometric.transforms import AddLaplacianEigenvectorPE, Distance
+from torch_geometric.transforms import Distance
 
 import hydragnn
 import hydragnn.utils.profiling_and_tracing.tracer as tr
@@ -28,8 +28,9 @@ except ImportError:
 log = logging.getLogger(__name__).info
 
 dist_transform = Distance(norm=False, cat=False)
+MAX_SAMPLES = 1000
 
-def md17_pre_transform(data, compute_edges, pe_transform):
+def md17_pre_transform(data, compute_edges):
     # Node features: [Z, x, y, z] to mirror the QM9 schema (dims [1,3])
     data.x = torch.cat((data.z.float().view(-1, 1), data.pos), dim=1)
 
@@ -39,21 +40,20 @@ def md17_pre_transform(data, compute_edges, pe_transform):
     # Create edge_attr as Euclidean distances
     data = dist_transform(data)
 
-    # Add Laplacian eigenvector PE
-    data = pe_transform(data)
-
-    # Optional: relative PE difference per edge
-    if hasattr(data, "pe") and data.edge_index is not None:
-        src, dst = data.edge_index[0], data.edge_index[1]
-        data.rel_pe = torch.abs(data.pe[src] - data.pe[dst])
-
     # Target: per-atom energy (parity with QM9 preonly)
     data.y = data.energy / len(data.x)
     return data
 
-# Probabilistic pre-filter (~25%). Delete processed/ to re-apply.
-def md17_pre_filter(_):
-    return torch.rand(1) < 0.25
+pre_filter_counter = 0
+
+# Deterministic cap on number of processed samples (similar to QM9)
+def md17_pre_filter(data):
+    global pre_filter_counter
+    idx = getattr(data, "idx", pre_filter_counter)
+    if idx >= MAX_SAMPLES:
+        return False
+    pre_filter_counter += 1
+    return True
 
 def main():
     # FIX random seed
@@ -141,16 +141,12 @@ def main():
     arch_config.setdefault("loop", False)
     compute_edges = hydragnn.preprocess.get_radius_graph_config(arch_config)
 
-    # Laplacian PE transform (default k=8 if not present)
-    pe_dim = arch_config.get("pe_dim", 8)
-    pe_transform = AddLaplacianEigenvectorPE(k=pe_dim, attr_name="pe", is_undirected=True)
-
     # Build MD17 dataset (uracil) with transforms/filters.
     # NOTE: Delete dataset/md17/uracil/processed to force re-run if you change transforms or pre_filter.
     dataset = torch_geometric.datasets.MD17(
         root="dataset/md17",
         name="uracil",
-        pre_transform=lambda d: md17_pre_transform(d, compute_edges, pe_transform),
+        pre_transform=lambda d: md17_pre_transform(d, compute_edges),
         pre_filter=md17_pre_filter,
     )
 
