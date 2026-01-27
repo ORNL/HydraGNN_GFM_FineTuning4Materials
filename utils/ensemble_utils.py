@@ -44,6 +44,9 @@ from hydragnn.preprocess.graph_samples_checks_and_updates import (
     check_if_graph_size_variable,
     gather_deg,
 )
+from hydragnn.utils.model import (
+    save_model,
+)
 
 try:
     from hydragnn.utils.adiosdataset import AdiosWriter, AdiosDataset
@@ -95,7 +98,7 @@ def update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader
             config["NeuralNetwork"]["Variables_of_interest"]["input_node_features"]
         )
         PNA_models = ["PNA", "PNAPlus", "PNAEq"]
-        if config["NeuralNetwork"]["Architecture"]["mpnn_type"] in PNA_models:
+        if config["NeuralNetwork"]["Architecture"]["model_type"] in PNA_models:
             if hasattr(train_loader.dataset, "pna_deg"):
                 ## Use max neighbours used in the datasets.
                 deg = torch.tensor(train_loader.dataset.pna_deg)
@@ -108,14 +111,14 @@ def update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader
 
         # Set CGCNN hidden dim to input dim if global attention is not being used
         if (
-                config["NeuralNetwork"]["Architecture"]["mpnn_type"] == "CGCNN"
+                config["NeuralNetwork"]["Architecture"]["model_type"] == "CGCNN"
                 and not config["NeuralNetwork"]["Architecture"]["global_attn_engine"]
         ):
             config["NeuralNetwork"]["Architecture"]["hidden_dim"] = config["NeuralNetwork"][
                 "Architecture"
             ]["input_dim"]
 
-        if config["NeuralNetwork"]["Architecture"]["mpnn_type"] == "MACE":
+        if config["NeuralNetwork"]["Architecture"]["model_type"] == "MACE":
             if hasattr(train_loader.dataset, "avg_num_neighbors"):
                 ## Use avg neighbours used in the dataset.
                 avg_num_neighbors = torch.tensor(train_loader.dataset.avg_num_neighbors)
@@ -280,6 +283,7 @@ class model_ensemble(torch.nn.Module):
         self.model_ens = torch.nn.ModuleList()
         for imodel, modeldir in enumerate(self.model_dir_list):
             input_filename = os.path.join(modeldir, "config.json")
+            #print("INPUT_FILENAME", input_filename, flush=True)
             with open(input_filename, "r") as f:
                 config = json.load(f)
             model = hydragnn.models.create_model_config(
@@ -492,6 +496,7 @@ def train_ensemble(model_ensemble, train_loader, val_loader, num_epochs, optimiz
         optimizers: List of optimizers, one for each model in the ensemble.
         device: Device to use ("cpu" or "cuda").
     """
+    finetuning_log_dir = os.getenv("FINETUNING_LOG_DIR")
     for epoch in iterate_tqdm(
                  range(num_epochs), verbosity_level=2, desc="Epoch", total=num_epochs
         ):
@@ -563,6 +568,8 @@ def run_finetune(dictionary_variables, args):
             finetuning_log_dir = "./logs"
         os.environ["FINETUNING_LOG_DIR"] = finetuning_log_dir
     os.makedirs(finetuning_log_dir, exist_ok=True)
+    modelname = "FineTuning" if args.modelname is None else args.modelname
+    os.makedirs(os.path.join(finetuning_log_dir, modelname), exist_ok=True)
 
     verbosity = ft_config["Verbosity"]["level"]
     var_config = ft_config["NeuralNetwork"]["Variables_of_interest"]
@@ -586,7 +593,7 @@ def run_finetune(dictionary_variables, args):
     )
 
     datasetname = "FineTuning" if args.datasetname is None else args.datasetname
-    modelname = "FineTuning" if args.modelname is None else args.modelname
+    #modelname = "FineTuning" if args.modelname is None else args.modelname
     log_name = modelname
     hydragnn.utils.print.print_utils.setup_log(log_name)
     writer = hydragnn.utils.model.get_summary_writer(log_name, path=finetuning_log_dir)
@@ -671,12 +678,12 @@ def run_finetune(dictionary_variables, args):
             # Use the original pretrained model directory name
             member_name = os.path.basename(model_dir_list[idx])
             # ensure log directory exists for this member under configured logs root
-            os.makedirs(os.path.join(finetuning_log_dir, member_name), exist_ok=True)
+            os.makedirs(os.path.join(finetuning_log_dir, modelname, member_name), exist_ok=True)
             member_checkpoints.append(
                 Checkpoint(
                     name=member_name,
                     warmup=warmup,
-                    path=finetuning_log_dir,
+                    path=os.path.join(finetuning_log_dir, modelname),
                     use_deepspeed=False,
                 )
             )
