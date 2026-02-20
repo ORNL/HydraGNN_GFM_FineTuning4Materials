@@ -65,26 +65,6 @@ def create_mlps(config):
 
     return nn.ModuleList(head_mlps)
 
-
-def update_ensemble(model, ft_config):
-    """
-    Updates the given model ensemble according to the specified fine-tuning configuration.
-    only meant to work on non-ddp models.
-    Args:
-        model (nn.Module): The model ensemble to be updated for fine-tuning. Must have `model_ens` attribute
-        ft_config (dict): A configuration dictionary containing fine-tuning parameters
-                          and architectural modifications.
-
-    Returns:
-        nn.Module: The updated ensemble model configured for fine-tuning.
-    """
-    updated_ens = [update_model(model_k) for model_k in model.model_ens]
-    model.model_ens = updated_ens 
-    model.num_heads = self.model_ens[0].module.num_heads
-    model.loss = self.model_ens[0].module.loss
-    model.model_size = len(self.model_dir_list)
-    return model
-
 def update_loss(model, ft_config):
     """
     Updates the given model losses according to the specified fine-tuning configuration.
