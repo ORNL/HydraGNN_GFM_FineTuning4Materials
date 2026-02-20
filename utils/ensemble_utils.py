@@ -537,8 +537,22 @@ def train_ensemble(model_ensemble, train_loader, val_loader, num_epochs, optimiz
                     print_master("Creating Checkpoint: %f" % cp.min_perf_metric)
                 print_master("Best Performance Metric: %f" % cp.min_perf_metric)
 
+def update_config_frozen_conv(file_path, freeze_val:bool):
+    # Load the JSON
+    with open(file_path, 'r') as f:
+        config = json.load(f)
 
-def run_finetune(dictionary_variables, args):
+    # Shortcut to the architecture section
+    arch = config["NeuralNetwork"]["Architecture"]
+
+    # Set freeze_conv_layers
+    arch["freeze_conv_layers"] = freeze_val
+
+    # Save the JSON back
+    with open(file_path, 'w') as f:
+        json.dump(config, f, indent=4)
+
+def run_finetune(dictionary_variables, args, freeze_conv:bool=None):
     """Main training/validation/test entry point.
     Accepts an argparse.Namespace-like `args`.
     """
@@ -641,6 +655,10 @@ def run_finetune(dictionary_variables, args):
     ensemble_path = Path(args.pretrained_model_ensemble_path)
     model_dir_list = [os.path.join(ensemble_path, model_id) for model_id in os.listdir(ensemble_path)]
     update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader)
+
+    if (freeze_conv is not None):
+        for modeldir in model_dir_list:
+            update_config_frozen_conv(os.path.join(modeldir, "config.json"), freeze_val=freeze_conv)
 
     model = model_ensemble(model_dir_list, fine_tune_config=ft_config, GFM_2024=True)
     model = get_distributed_model(model, verbosity=2)
