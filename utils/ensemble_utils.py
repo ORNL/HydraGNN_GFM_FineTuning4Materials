@@ -1,4 +1,6 @@
 import pandas as pd
+import numpy as np
+from typing import List
 
 import utils.update_model as um
 
@@ -53,6 +55,48 @@ except ImportError:
 
 import torch
 import glob, re
+
+def build_arg_parser():
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument("--ddstore", action="store_true", help="ddstore dataset")
+    parser.add_argument("--ddstore_width", type=int, help="ddstore width", default=None)
+    parser.add_argument("--shmem", action="store_true", help="shmem")
+    parser.add_argument(
+        "--pretrained_model_ensemble_path",
+        help="directory for ensemble of models",
+        type=str,
+        default="pretrained_model_ensemble",
+    )
+    parser.add_argument(
+        "--finetuning_config",
+        help="path to JSON file with configuration for fine-tunable architecture",
+        type=str,
+        default="./finetuning_config.json",
+    )
+    parser.add_argument("--log", help="log name")
+    parser.add_argument("--datasetname", help="dataset name")
+    parser.add_argument("--modelname", help="model name")
+    parser.add_argument("--batch_size", type=int, help="batch_size", default=None)
+
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--adios",
+        help="Adios dataset",
+        action="store_const",
+        dest="format",
+        const="adios",
+    )
+    group.add_argument(
+        "--pickle",
+        help="Pickle dataset",
+        action="store_const",
+        dest="format",
+        const="pickle",
+    )
+    parser.set_defaults(format="pickle")
+    return parser
 
 def update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader):
     for imodel, modeldir in enumerate(model_dir_list):
@@ -190,7 +234,6 @@ def update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader
 
         hydragnn.utils.input_config_parsing.save_config(config, log_name="", path=modeldir)
 
-
 def update_head_string(s: str) -> str:
     """
     Modify strings like:
@@ -218,7 +261,6 @@ def update_graph_shared_string(s: str) -> str:
         parts[2] = f"branch-0.{parts[2]}"
         return ".".join([parts[0], parts[1], parts[2], parts[3]])
     return s
-
 
 def update_GFM_2024_checkpoint(
     model, model_name, path="./logs/", optimizer=None, use_deepspeed=False
@@ -271,7 +313,6 @@ def update_GFM_2024_checkpoint(
     # Optionally load optimizer state
     if (optimizer is not None) and ("optimizer_state_dict" in checkpoint):
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-
 
 class model_ensemble(torch.nn.Module):
     def __init__(self, model_dir_list, modelname=None, dir_extra="", verbosity=1, fine_tune_config = None, GFM_2024=False):
@@ -384,8 +425,83 @@ class model_ensemble(torch.nn.Module):
     def __len__(self):
         return self.model_size
 
+def test_ensemble_jamie(model_ens, loader, dataset_name, verbosity, save_results:bool=False, num_samples:int=None)->List[np.ndarray]:
+    n_ens = len(model_ens.module)
+    num_heads = model_ens.module.num_heads
+    num_samples_total = 0
+    device = next(model_ens.parameters()).device
 
-def test_ensemble(model_ens, loader, dataset_name, verbosity, num_samples=None):
+    true_values = [[] for _ in range(num_heads)]
+    predicted_values = [[[] for _ in range(num_heads)] for _ in range(n_ens)]
+    
+    model_ens.eval()
+    
+    with torch.no_grad():
+        for data in iterate_tqdm(loader, verbosity):
+            data = data.to(device)
+            head_index = get_head_indices(model_ens.module.model_ens[0], data)
+            pred_ens = model_ens(data)
+            ytrue = data.y
+
+            for ihead in range(num_heads):
+                head_val = ytrue[head_index[ihead]]
+                true_values[ihead].extend(head_val.tolist()) # Convert to list immediately
+
+            for imodel, pred in enumerate(pred_ens):
+                if imodel == 0:
+                    num_samples_total += data.num_graphs
+                for ihead in range(num_heads):
+                    # Flatten to ensure 1D
+                    head_pre = pred[ihead].reshape(-1)
+                    predicted_values[imodel][ihead].extend(head_pre.tolist())
+            
+            if num_samples is not None and num_samples_total > num_samples//hydragnn.utils.get_comm_size_and_rank()[0]-1:
+                break
+
+        final_true = []
+        final_mean = []
+        final_std = []
+
+        for ihead in range(num_heads):
+            head_pred_list = []
+            for imodel in range(n_ens):
+                # Ensure we are dealing with a 1D tensor [Samples]
+                model_pred_head = torch.tensor(predicted_values[imodel][ihead], device=device).flatten()
+                model_pred_head = gather_tensor_ranks(model_pred_head)
+                head_pred_list.append(model_pred_head)
+
+            # Stack to [NumModels, Samples]
+            head_pred_ens = torch.stack(head_pred_list, dim=0)
+            
+            # Mean and Std across model dimension (dim=0)
+            h_mean = head_pred_ens.mean(dim=0)
+            if n_ens > 1:
+                h_std = head_pred_ens.std(dim=0)
+            else:
+                h_std = torch.zeros_like(h_mean)
+
+            # Process True values
+            t_val = torch.tensor(true_values[ihead], device=device).flatten()
+            t_val = gather_tensor_ranks(t_val)
+
+            # Store as clean 1D numpy arrays
+            final_true.append(t_val.cpu().numpy())
+            final_mean.append(h_mean.cpu().numpy())
+            final_std.append(h_std.cpu().numpy())
+
+    if (save_results):
+        outputs_df = pd.DataFrame({
+            "True Value": final_true[0],
+            "Predicted Value": final_mean[0],
+            "Std Dev": final_std[0]
+        })
+    
+    if (dataset_name is not None):
+        print(f"Done testing for {dataset_name}")
+
+    return final_true, final_mean, final_std
+
+def test_ensemble(model_ens, loader, dataset_name, verbosity, save_results:bool=False, num_samples:int=None):
     n_ens=len(model_ens.module)
     num_heads=model_ens.module.num_heads
 
@@ -394,60 +510,73 @@ def test_ensemble(model_ens, loader, dataset_name, verbosity, num_samples=None):
 
     true_values = [[] for _ in range(num_heads)]
     predicted_values = [[[] for _ in range(num_heads)] for _ in range(n_ens)]
-   
-    for data in iterate_tqdm(loader, verbosity):
-        data=data.to(device)
-        head_index = get_head_indices(model_ens.module.model_ens[0], data)
-        ###########################
-        pred_ens = model_ens(data)
-        ###########################
-        ytrue = data.y
-        for ihead in range(num_heads):
-            head_val = ytrue[head_index[ihead]]
-            true_values[ihead].extend(head_val)
-        ###########################
-        for imodel, pred in enumerate(pred_ens):
-            if imodel==0:
-                num_samples_total += data.num_graphs
-            for ihead in range(num_heads):
-                head_pre = pred[ihead].reshape(-1, 1)
-                pred_shape = head_pre.shape
-                predicted_values[imodel][ihead].extend(head_pre.tolist())
-        if num_samples is not None and num_samples_total > num_samples//hydragnn.utils.get_comm_size_and_rank()[0]-1:
-            break
-
-    predicted_mean= [[] for _ in range(num_heads)]
-    predicted_std= [[] for _ in range(num_heads)]
-    for ihead in range(num_heads):
-        head_pred = []
-       # print("For head %d"%ihead)
-        for imodel in range(len(model_ens.module)):
-            head_all = torch.tensor(predicted_values[imodel][ihead])
-            head_all = gather_tensor_ranks(head_all)
-            # print("imodel %d"%imodel, head_all.size())
-            # if debug_nan(head_all, message="pred from model %d"%imodel):
-            #     print("Warning: NAN detected in model %d; prediction skipped"%imodel)
-            #     continue
-            head_pred.append(head_all)
-
-        true_values[ihead] = torch.cat(true_values[ihead], dim=0)
-        head_pred_ens = torch.stack(head_pred, dim=0).squeeze()
-        head_pred_mean = head_pred_ens.mean(axis=0)
-        head_pred_std = head_pred_ens.std(axis=0)
-        true_values[ihead] = gather_tensor_ranks(true_values[ihead])
-        predicted_mean[ihead] = head_pred_mean 
-        predicted_std[ihead] = head_pred_std
-        # print(head_pred_ens.size(), true_values[ihead].size())
     
-    #save values to pandas dataframe
-    Smiles = "blank"
-    t_values = true_values[0].tolist()
-    pred_values = predicted_mean[0].tolist()
-    outputs_df = pd.DataFrame({
-        "SMILE Strings": Smiles,
-        "True Value": t_values,
-        "Predicted Value": pred_values
-    })
+    # Set to eval mode
+    model_ens.eval()
+    
+    # Don't track gradients
+    with torch.no_grad():
+        # Iterate over dataloader
+        for data in iterate_tqdm(loader, verbosity):
+            data=data.to(device)
+            head_index = get_head_indices(model_ens.module.model_ens[0], data)
+            ###########################
+            pred_ens = model_ens(data)
+            ###########################
+            ytrue = data.y
+            for ihead in range(num_heads):
+                head_val = ytrue[head_index[ihead]]
+                true_values[ihead].extend(head_val)
+            ###########################
+            for imodel, pred in enumerate(pred_ens):
+                if imodel==0:
+                    num_samples_total += data.num_graphs
+                for ihead in range(num_heads):
+                    head_pre = pred[ihead].reshape(-1, 1)
+                    pred_shape = head_pre.shape
+                    predicted_values[imodel][ihead].extend(head_pre.tolist())
+            if num_samples is not None and num_samples_total > num_samples//hydragnn.utils.get_comm_size_and_rank()[0]-1:
+                break
+
+        predicted_mean= [[] for _ in range(num_heads)]
+        predicted_std= [[] for _ in range(num_heads)]
+        for ihead in range(num_heads):
+            head_pred = []
+            for imodel in range(len(model_ens.module)):
+                # Convert the list of lists [[v1], [v2]] into a tensor [N, 1]
+                head_all = torch.tensor(predicted_values[imodel][ihead])
+                head_all = gather_tensor_ranks(head_all)
+                head_pred.append(head_all)
+
+            # true_values: shape [NumSamples, 1] -> flatten to [NumSamples]
+            true_values[ihead] = torch.cat(true_values[ihead], dim=0).flatten()
+            
+            # head_pred_ens shape: [NumModels, NumSamples, 1]
+            head_pred_ens = torch.stack(head_pred, dim=0)
+            
+            # Squeeze only the last dimension (the -1) 
+            head_pred_ens = head_pred_ens.squeeze(-1)
+            
+            # Calculate mean and std across the model dimension (dim=0)
+            head_pred_mean = head_pred_ens.mean(dim=0)
+            head_pred_std = head_pred_ens.std(dim=0)
+
+            # Re-sync true values from all ranks
+            true_values[ihead] = gather_tensor_ranks(true_values[ihead])
+            
+            predicted_mean[ihead] = head_pred_mean 
+            predicted_std[ihead] = head_pred_std
+
+    if (save_results):
+        #save values to pandas dataframe
+        Smiles = "blank"
+        t_values = true_values[0].tolist()
+        pred_values = predicted_mean[0].tolist()
+        outputs_df = pd.DataFrame({
+            "SMILE Strings": Smiles,
+            "True Value": t_values,
+            "Predicted Value": pred_values
+        })
     
     print(f"Done testing for {dataset_name}")
 
@@ -552,6 +681,83 @@ def update_config_frozen_conv(file_path, freeze_val:bool):
     with open(file_path, 'w') as f:
         json.dump(config, f, indent=4)
 
+def load_finetuning_config(args):
+    with open(args.finetuning_config, "r") as f:
+        ft_config = json.load(f)
+    return ft_config
+
+def load_datasets(args, ft_config, dictionary_variables):
+    
+    # Make sure the variable config is consistent with the model config for loading datasets
+    var_config = ft_config["NeuralNetwork"]["Variables_of_interest"]
+    var_config["graph_feature_names"] = dictionary_variables['graph_feature_names']
+    var_config["graph_feature_dims"] = dictionary_variables['graph_feature_dims']
+    var_config["node_feature_names"] = dictionary_variables['node_feature_names']
+    var_config["node_feature_dims"] = dictionary_variables['node_feature_dims']
+    
+    # Load based on format
+    if args.format == "adios":
+        info("Adios load")
+        if AdiosDataset is None:
+            raise ImportError("AdiosDataset not available. Reinstall with ADIOS2 support.")
+        assert not (args.shmem and args.ddstore), "Cannot use both ddstore and shmem"
+        opt = {
+            "preload": False,
+            "shmem": args.shmem,
+            "ddstore": args.ddstore,
+            "ddstore_width": args.ddstore_width,
+        }
+        fname = os.path.join(os.path.dirname(__file__), f"./dataset/{args.datasetname}.bp")
+        trainset = AdiosDataset(fname, "trainset", MPI.COMM_WORLD, **opt, var_config=var_config)
+        valset   = AdiosDataset(fname, "valset",   MPI.COMM_WORLD, **opt, var_config=var_config)
+        testset  = AdiosDataset(fname, "testset",  MPI.COMM_WORLD, **opt, var_config=var_config)
+
+    elif args.format == "pickle":
+        info("Pickle load")
+        basedir = os.path.join(os.path.dirname(__file__), "../dataset", f"{args.datasetname}.pickle")
+        trainset = SimplePickleDataset(basedir=basedir, label="trainset", var_config=var_config)
+        valset   = SimplePickleDataset(basedir=basedir, label="valset",   var_config=var_config)
+        testset  = SimplePickleDataset(basedir=basedir, label="testset",  var_config=var_config)
+
+    else:
+        raise NotImplementedError(f"No supported format: {args.format}")
+    
+    print("Loaded dataset.")
+    info("trainset,valset,testset size: %d %d %d" % (len(trainset), len(valset), len(testset)))
+    
+    return trainset, valset, testset
+
+def make_dataloaders(trainset, valset, testset, batch_size:int=16, ddstore=False):
+    # Create dataloaders
+    if ddstore:
+        os.environ["HYDRAGNN_AGGR_BACKEND"] = "mpi"
+        os.environ["HYDRAGNN_USE_ddstore"] = "1"
+    (train_loader, val_loader, test_loader) = hydragnn.preprocess.create_dataloaders(trainset, valset, testset, batch_size)
+
+    return train_loader, val_loader, test_loader
+
+def get_ensemble(args, ft_config, train_loader, val_loader, test_loader, freeze_conv=None):
+    # ---- ensemble setup ----
+    ensemble_path = Path(args.pretrained_model_ensemble_path)
+    model_dir_list = [os.path.join(ensemble_path, model_id) for model_id in os.listdir(ensemble_path)]
+    update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader)
+
+    if (freeze_conv is not None):
+        for modeldir in model_dir_list:
+            update_config_frozen_conv(os.path.join(modeldir, "config.json"), freeze_val=freeze_conv)
+
+    model = model_ensemble(model_dir_list, fine_tune_config=ft_config, GFM_2024=True)
+    model = get_distributed_model(model, verbosity=2)
+    
+    return model
+
+def setup_distributed_finetuning():
+    # ---- initialize DDP / MPI ----
+    comm_size, rank = setup_ddp()
+    comm = MPI.COMM_WORLD
+    # Return variables
+    return comm_size, rank, comm   
+
 def run_finetune(dictionary_variables, args, freeze_conv:bool=None):
     """Main training/validation/test entry point.
     Accepts an argparse.Namespace-like `args`.
@@ -563,15 +769,13 @@ def run_finetune(dictionary_variables, args, freeze_conv:bool=None):
     timer.start()
 
     # ---- load fine-tuning config ----
-    ftcfgfile = args.finetuning_config
-    with open(ftcfgfile, "r") as f:
-        ft_config = json.load(f)
+    ft_config = load_finetuning_config(args)
 
     # ---- default FINETUNING_LOG_DIR if not set ----
     finetuning_log_dir = os.getenv("FINETUNING_LOG_DIR")
     if not finetuning_log_dir:
         try:
-            example_dir = Path(os.path.abspath(ftcfgfile)).parent
+            example_dir = Path(os.path.abspath(args.finetuning_config)).parent
             finetuning_log_dir = str(example_dir / "logs")
         except Exception:
             finetuning_log_dir = "./logs"
@@ -579,18 +783,11 @@ def run_finetune(dictionary_variables, args, freeze_conv:bool=None):
     os.makedirs(finetuning_log_dir, exist_ok=True)
 
     verbosity = ft_config["Verbosity"]["level"]
-    var_config = ft_config["NeuralNetwork"]["Variables_of_interest"]
-    var_config["graph_feature_names"] = dictionary_variables['graph_feature_names']
-    var_config["graph_feature_dims"] = dictionary_variables['graph_feature_dims']
-    var_config["node_feature_names"] = dictionary_variables['node_feature_names']
-    var_config["node_feature_dims"] = dictionary_variables['node_feature_dims']
-
     if args.batch_size is not None:
         ft_config["NeuralNetwork"]["Training"]["batch_size"] = args.batch_size
 
-    # ---- initialize DDP / MPI ----
-    comm_size, rank = setup_ddp()
-    comm = MPI.COMM_WORLD
+    # Initialize DDP/MPI
+    comm_size, rank, comm = setup_distributed_finetuning()
 
     # ---- logging ----
     logging.basicConfig(
@@ -607,61 +804,20 @@ def run_finetune(dictionary_variables, args, freeze_conv:bool=None):
 
     log("Command: {0}\n".format(" ".join([x for x in sys.argv])), rank=0)
 
-    # ---- dataset loading ----
-    if args.format == "adios":
-        info("Adios load")
-        if AdiosDataset is None:
-            raise ImportError("AdiosDataset not available. Reinstall with ADIOS2 support.")
-        assert not (args.shmem and args.ddstore), "Cannot use both ddstore and shmem"
-        opt = {
-            "preload": False,
-            "shmem": args.shmem,
-            "ddstore": args.ddstore,
-            "ddstore_width": args.ddstore_width,
-        }
-        fname = os.path.join(os.path.dirname(__file__), f"./dataset/{datasetname}.bp")
-        trainset = AdiosDataset(fname, "trainset", comm, **opt, var_config=var_config)
-        valset   = AdiosDataset(fname, "valset",   comm, **opt, var_config=var_config)
-        testset  = AdiosDataset(fname, "testset",  comm, **opt, var_config=var_config)
-
-    elif args.format == "pickle":
-        info("Pickle load")
-        basedir = os.path.join(os.path.dirname(__file__), "../dataset", f"{datasetname}.pickle")
-        trainset = SimplePickleDataset(basedir=basedir, label="trainset", var_config=var_config)
-        valset   = SimplePickleDataset(basedir=basedir, label="valset",   var_config=var_config)
-        testset  = SimplePickleDataset(basedir=basedir, label="testset",  var_config=var_config)
-
-        pna_deg = trainset.pna_deg
-        if args.ddstore:
-            opt = {"ddstore_width": args.ddstore_width}
-            trainset = DistDataset(trainset, "trainset", comm, **opt)
-            valset   = DistDataset(valset,   "valset",   comm, **opt)
-            testset  = DistDataset(testset,  "testset",  comm, **opt)
-            trainset.pna_deg = pna_deg
-    else:
-        raise NotImplementedError(f"No supported format: {args.format}")
-
-    print("Loaded dataset.")
-    info("trainset,valset,testset size: %d %d %d" % (len(trainset), len(valset), len(testset)))
-
-    if args.ddstore:
-        os.environ["HYDRAGNN_AGGR_BACKEND"] = "mpi"
-        os.environ["HYDRAGNN_USE_ddstore"] = "1"
-    (train_loader, val_loader, test_loader) = hydragnn.preprocess.create_dataloaders(
-        trainset, valset, testset, ft_config["NeuralNetwork"]["Training"]["batch_size"]
-    )
-
-    # ---- ensemble setup ----
+    # Get model list
     ensemble_path = Path(args.pretrained_model_ensemble_path)
     model_dir_list = [os.path.join(ensemble_path, model_id) for model_id in os.listdir(ensemble_path)]
-    update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader)
 
-    if (freeze_conv is not None):
-        for modeldir in model_dir_list:
-            update_config_frozen_conv(os.path.join(modeldir, "config.json"), freeze_val=freeze_conv)
+    # Load datasets
+    trainset, valset, testset = load_datasets(args, ft_config, dictionary_variables)
 
-    model = model_ensemble(model_dir_list, fine_tune_config=ft_config, GFM_2024=True)
-    model = get_distributed_model(model, verbosity=2)
+    # Make dataloaders
+    train_loader, val_loader, test_loader = make_dataloaders(trainset, valset, testset,
+                                                            batch_size=ft_config["NeuralNetwork"]["Training"]["batch_size"],
+                                                            ddstore=args.ddstore)
+
+    # Setup ensemble of models for fine-tuning
+    model = get_ensemble(args, ft_config, train_loader, val_loader, test_loader, freeze_conv=freeze_conv)
 
     print("Created Dataloaders")
     comm.Barrier()
@@ -710,50 +866,7 @@ def run_finetune(dictionary_variables, args, freeze_conv:bool=None):
     )
 
     # Test the ensemble
-    test_ensemble(model, test_loader, modelname, verbosity=2)
+    test_ensemble(model, test_loader, modelname, verbosity=2, save_results=True)
 
     # Optional: return something useful (e.g., final metrics)
     return True
-
-
-def build_arg_parser():
-    parser = argparse.ArgumentParser(
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    parser.add_argument("--ddstore", action="store_true", help="ddstore dataset")
-    parser.add_argument("--ddstore_width", type=int, help="ddstore width", default=None)
-    parser.add_argument("--shmem", action="store_true", help="shmem")
-    parser.add_argument(
-        "--pretrained_model_ensemble_path",
-        help="directory for ensemble of models",
-        type=str,
-        default="pretrained_model_ensemble",
-    )
-    parser.add_argument(
-        "--finetuning_config",
-        help="path to JSON file with configuration for fine-tunable architecture",
-        type=str,
-        default="./finetuning_config.json",
-    )
-    parser.add_argument("--log", help="log name")
-    parser.add_argument("--datasetname", help="dataset name")
-    parser.add_argument("--modelname", help="model name")
-    parser.add_argument("--batch_size", type=int, help="batch_size", default=None)
-
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument(
-        "--adios",
-        help="Adios dataset",
-        action="store_const",
-        dest="format",
-        const="adios",
-    )
-    group.add_argument(
-        "--pickle",
-        help="Pickle dataset",
-        action="store_const",
-        dest="format",
-        const="pickle",
-    )
-    parser.set_defaults(format="pickle")
-    return parser
