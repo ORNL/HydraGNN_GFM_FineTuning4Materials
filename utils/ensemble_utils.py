@@ -92,7 +92,7 @@ def update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader
             config["NeuralNetwork"]["Training"]["compute_grad_energy"] = False
 
         config["NeuralNetwork"]["Architecture"]["input_dim"] = len(
-            config["NeuralNetwork"]["Variables_of_interest"]["input_node_features"]
+            config["NeuralNetwork"]["Variables_of_interest"].get("input_node_features", [0])
         )
         PNA_models = ["PNA", "PNAPlus", "PNAEq"]
         if config["NeuralNetwork"]["Architecture"]["mpnn_type"] in PNA_models:
@@ -190,7 +190,33 @@ def update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader
 
         hydragnn.utils.input_config_parsing.save_config(config, log_name="", path=modeldir)
 
+def _force_dataset_name_2d(batch):
+    if getattr(batch, "batch", None) is None:
+        num_graphs = 1
+        device = batch.x.device
+    else:
+        num_graphs = int(batch.batch.max().item()) + 1
+        device = batch.batch.device
 
+    ds = torch.zeros((num_graphs, 1), device=device, dtype=torch.long)
+    setattr(batch, "dataset_name", ds)
+    return batch
+def get_distributed_model_find_unused(model, verbosity=0):
+    import torch.distributed as dist
+    from torch.nn.parallel import DistributedDataParallel as DDP
+
+    if dist.is_available() and dist.is_initialized():
+        device = get_device()
+        model = model.to(device)
+        if device.type == "cuda":
+            return DDP(
+                model,
+                device_ids=[device.index],
+                output_device=device.index,
+                find_unused_parameters=True,
+            )
+        return DDP(model, find_unused_parameters=True)
+    return model
 def update_head_string(s: str) -> str:
     """
     Modify strings like:
@@ -223,16 +249,12 @@ def update_graph_shared_string(s: str) -> str:
 def update_GFM_2024_checkpoint(
     model, model_name, path="./logs/", optimizer=None, use_deepspeed=False
 ):
-    """Load both model and optimizer state from a single checkpoint file, renaming head keys.
-       If <model_name>.pk is missing, fall back to the highest <model_name>_epoch_*.pk.
-    """
     model_dir = os.path.join(path, model_name)
     base_pk = os.path.join(model_dir, f"{model_name}.pk")
 
     if os.path.isfile(base_pk):
         path_name = base_pk
     else:
-        # pick highest epoch like <model>_epoch_XX.pk
         candidates = glob.glob(os.path.join(model_dir, f"{model_name}_epoch_*.pk"))
         if not candidates:
             raise FileNotFoundError(
@@ -253,25 +275,27 @@ def update_GFM_2024_checkpoint(
     checkpoint = torch.load(path_name, map_location=map_location)
     state_dict = checkpoint.get("model_state_dict", checkpoint)
 
-    # Build a renamed copy so we don't modify while iterating
-    renamed_state_dict = {}
-    for k, v in state_dict.items():
-        if "head" in k:
-            new_k = update_head_string(k)
-        elif "graph_shared" in k:
-            new_k = update_graph_shared_string(k)
-        else:
-            new_k = k
-        renamed_state_dict[new_k] = v
-    state_dict = renamed_state_dict  # write back the updated mapping
+    needs_rename = any(
+        (".heads_NN." in k or ".graph_shared." in k) and ("branch-" not in k)
+        for k in state_dict.keys()
+    )
 
-    # Load into model
-    model.load_state_dict(state_dict)
+    if needs_rename:
+        renamed_state_dict = {}
+        for k, v in state_dict.items():
+            if ".heads_NN." in k:
+                new_k = update_head_string(k)
+            elif ".graph_shared." in k:
+                new_k = update_graph_shared_string(k)
+            else:
+                new_k = k
+            renamed_state_dict[new_k] = v
+        state_dict = renamed_state_dict
 
-    # Optionally load optimizer state
+    model.load_state_dict(state_dict, strict=False)
+
     if (optimizer is not None) and ("optimizer_state_dict" in checkpoint):
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-
 
 class model_ensemble(torch.nn.Module):
     def __init__(self, model_dir_list, modelname=None, dir_extra="", verbosity=1, fine_tune_config = None, GFM_2024=False):
@@ -303,8 +327,7 @@ class model_ensemble(torch.nn.Module):
             if fine_tune_config is not None: 
                 model = model.module
                 model = um.update_model(model, fine_tune_config)
-                model = hydragnn.utils.distributed.get_distributed_model(model, verbosity)
-
+                model = get_distributed_model_find_unused(model, verbosity)
             self.model_ens.append(model)
 
         self.num_heads = self.model_ens[0].module.num_heads
@@ -396,7 +419,8 @@ def test_ensemble(model_ens, loader, dataset_name, verbosity, num_samples=None):
     predicted_values = [[[] for _ in range(num_heads)] for _ in range(n_ens)]
    
     for data in iterate_tqdm(loader, verbosity):
-        data=data.to(device)
+        data = data.to(device)
+        data = _force_dataset_name_2d(data)
         head_index = get_head_indices(model_ens.module.model_ens[0], data)
         ###########################
         pred_ens = model_ens(data)
@@ -504,8 +528,9 @@ def train_ensemble(model_ensemble, train_loader, val_loader, num_epochs, optimiz
                     enumerate(train_loader), verbosity_level=2, desc="Train Ensemble", total=nbatch
             ):
             # Forward pass and backpropagation
-            total_tasks_loss = torch.atleast_1d(model_ensemble.module.loss_and_backprop(batch.to(get_device())))
-
+            batch = batch.to(get_device())
+            batch = _force_dataset_name_2d(batch)
+            total_tasks_loss = torch.atleast_1d(model_ensemble.module.loss_and_backprop(batch))
             # Optimizer step for each ensemble member
             for optimizer in optimizers:
                 optimizer.step()
@@ -520,8 +545,9 @@ def train_ensemble(model_ensemble, train_loader, val_loader, num_epochs, optimiz
         val_loss = 0 
         for batch in val_loader: 
             #forward pass 
-            total_tasks_loss = torch.atleast_1d(model_ensemble.module.val_loss(batch.to(get_device())))
-
+            batch = batch.to(get_device())
+            batch = _force_dataset_name_2d(batch)
+            total_tasks_loss = torch.atleast_1d(model_ensemble.module.val_loss(batch))
             #accumulate validation loss for logging 
             val_loss += total_tasks_loss[0]
 
@@ -570,7 +596,7 @@ def run_finetune(dictionary_variables, args):
     var_config["graph_feature_dims"] = dictionary_variables['graph_feature_dims']
     var_config["node_feature_names"] = dictionary_variables['node_feature_names']
     var_config["node_feature_dims"] = dictionary_variables['node_feature_dims']
-
+    var_config["input_node_features"] = [0]
     if args.batch_size is not None:
         ft_config["NeuralNetwork"]["Training"]["batch_size"] = args.batch_size
 
@@ -643,7 +669,7 @@ def run_finetune(dictionary_variables, args):
     update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader)
 
     model = model_ensemble(model_dir_list, fine_tune_config=ft_config, GFM_2024=True)
-    model = get_distributed_model(model, verbosity=2)
+    model = get_distributed_model_find_unused(model, verbosity=2)
 
     print("Created Dataloaders")
     comm.Barrier()
