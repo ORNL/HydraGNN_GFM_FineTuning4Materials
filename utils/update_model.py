@@ -34,6 +34,91 @@ def _drop_wrapper_decoder_modules(model, decoder_target):
             del model._modules[module_name]
 
 
+def _freeze_module(module):
+    """Disable gradients for every parameter owned by a module."""
+    if module is None:
+        return
+    for parameter in module.parameters():
+        parameter.requires_grad = False
+
+
+def _normalize_freeze_mode(raw_mode):
+    """Map user-facing freeze labels to canonical internal names."""
+    normalized = str(raw_mode).strip().lower()
+    aliases = {
+        "none": "none",
+        "shared + head": "shared_head",
+        "shared+head": "shared_head",
+        "shared_head": "shared_head",
+        "message passing": "message_passing",
+        "message_passing": "message_passing",
+    }
+    if normalized not in aliases:
+        raise ValueError(
+            "Unsupported freeze_mode. Use one of: 'None', 'shared + head', 'message passing'."
+        )
+    return aliases[normalized]
+
+
+def _keep_pretrained_branch_zero(decoder_target):
+    """Keep the loaded decoder weights and prune to the active branch-0 path."""
+    if "branch-0" not in decoder_target.graph_shared:
+        raise ValueError("Expected pretrained graph_shared to contain branch-0")
+
+    graph_shared = nn.ModuleDict({"branch-0": decoder_target.graph_shared["branch-0"]})
+    heads_nn = nn.ModuleList()
+    for head_module in decoder_target.heads_NN:
+        if "branch-0" not in head_module:
+            raise ValueError("Expected pretrained heads_NN to contain branch-0")
+        heads_nn.append(nn.ModuleDict({"branch-0": head_module["branch-0"]}))
+
+    decoder_target.graph_shared = graph_shared
+    decoder_target.heads_NN = heads_nn
+    decoder_target.num_branches = 1
+
+    if isinstance(decoder_target.config_heads, dict) and "graph" in decoder_target.config_heads:
+        decoder_target.config_heads["graph"] = [
+            branch_spec
+            for branch_spec in decoder_target.config_heads["graph"]
+            if branch_spec.get("type") == "branch-0"
+        ]
+
+
+def apply_freeze_mode(model, ft_config):
+    """Freeze selected model regions for fine-tuning experiments."""
+    decoder_target = _resolve_decoder_target(model)
+    freeze_mode = _normalize_freeze_mode(
+        ft_config["NeuralNetwork"]["Training"].get("freeze_mode", "none")
+    )
+
+    if freeze_mode == "none":
+        return model
+
+    if freeze_mode == "shared_head":
+        _freeze_module(decoder_target.graph_shared)
+        _freeze_module(decoder_target.heads_NN)
+        return model
+
+    if freeze_mode == "message_passing":
+        for module_name in (
+            "graph_convs",
+            "feature_layers",
+            "graph_conditioner",
+            "graph_concat_projector",
+            "graph_pool_projector",
+            "pos_emb",
+            "node_emb",
+            "node_lin",
+            "rel_pos_emb",
+            "edge_emb",
+            "edge_lin",
+        ):
+            _freeze_module(getattr(decoder_target, module_name, None))
+        return model
+
+    return model
+
+
 def create_graph_shared_layers(config, hidden_dim, activation_function):
     """
     Create the shared graph-level decoder layers used before branch-specific heads.
@@ -124,7 +209,7 @@ def update_loss(model, ft_config):
     return model
 
 def generic_loss(pred, value, head_index, losses, weights):
-    tot_loss = 0
+    tot_loss = None
     tasks_loss = []
     for ihead,loss in enumerate(losses):
         head_pre = pred[ihead]
@@ -135,7 +220,8 @@ def generic_loss(pred, value, head_index, losses, weights):
         if pred_shape != value_shape:
             head_val = torch.reshape(head_val, pred_shape)
         loss_i = loss(head_pre, head_val)
-        tot_loss += (loss_i * weights[ihead]).float() 
+        weighted_loss = loss_i * weights[ihead].to(device=loss_i.device, dtype=loss_i.dtype)
+        tot_loss = weighted_loss if tot_loss is None else tot_loss + weighted_loss
         tasks_loss.append(tot_loss)
     return tot_loss, tasks_loss
         
@@ -166,8 +252,19 @@ def update_architecture(model, ft_config):
         nn.Module: The updated model configured for fine-tuning.
     """
     decoder_target = _resolve_decoder_target(model)
-    device = next(decoder_target.parameters()).device
     architecture_config = ft_config["NeuralNetwork"]["Architecture"]
+    keep_pretrained_decoder = ft_config["NeuralNetwork"]["Training"].get(
+        "keep_pretrained_decoder", False
+    )
+
+    if keep_pretrained_decoder:
+        _keep_pretrained_branch_zero(decoder_target)
+        _drop_wrapper_decoder_modules(model, decoder_target)
+        print(decoder_target.graph_shared)
+        print(decoder_target.heads_NN)
+        return model
+
+    device = next(decoder_target.parameters()).device
 
     decoder_target.graph_shared = create_graph_shared_layers(
         architecture_config,
@@ -202,6 +299,7 @@ def update_model(model, ft_config):
     Returns:
         nn.Module: The updated model configured for fine-tuning.
     """
-    model = update_architecture(model, ft_config)        
+    model = update_architecture(model, ft_config)
+    model = apply_freeze_mode(model, ft_config)
     model = update_loss(model, ft_config)
     return model

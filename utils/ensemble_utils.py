@@ -40,7 +40,13 @@ from hydragnn.utils.input_config_parsing import update_config_edge_dim, update_c
 from hydragnn.utils.model import update_multibranch_heads
 import hydragnn.utils.profiling_and_tracing.tracer as tr
 
-from hydragnn.train.train_validate_test import get_nbatch, get_head_indices, reduce_values_ranks, gather_tensor_ranks
+from hydragnn.train.train_validate_test import (
+    gather_tensor_ranks,
+    get_head_indices,
+    get_nbatch,
+    reduce_values_ranks,
+    resolve_precision,
+)
 
 from hydragnn.preprocess.graph_samples_checks_and_updates import (
     check_if_graph_size_variable,
@@ -55,6 +61,67 @@ except ImportError:
 
 import torch
 import glob, re
+
+
+def _get_param_dtype(training_config: dict) -> torch.dtype:
+    """Resolve the parameter dtype configured for fine-tuning."""
+    _, param_dtype, _ = resolve_precision(training_config.get("precision", "fp32"))
+    return param_dtype
+
+
+def _move_batch_to_training_precision(data, training_config: dict):
+    """Move a batch to the active device and configured floating-point dtype."""
+    param_dtype = _get_param_dtype(training_config)
+    data = data.to(get_device())
+    for field_name in data.keys():
+        field_value = getattr(data, field_name, None)
+        if torch.is_tensor(field_value) and torch.is_floating_point(field_value):
+            setattr(data, field_name, field_value.to(dtype=param_dtype))
+    return data
+
+
+def _get_num_atoms_per_graph(
+    data: torch.Tensor, dtype: torch.dtype | None = None
+) -> torch.Tensor:
+    """Return the atom count for each graph in a batched PyG object."""
+    count_dtype = dtype if dtype is not None else data.y.dtype
+    if getattr(data, "ptr", None) is not None:
+        return (data.ptr[1:] - data.ptr[:-1]).to(dtype=count_dtype, device=data.y.device)
+
+    if getattr(data, "batch", None) is not None:
+        num_graphs = int(data.batch.max().item()) + 1
+        counts = torch.bincount(data.batch, minlength=num_graphs)
+        return counts.to(dtype=count_dtype, device=data.y.device)
+
+    return torch.tensor([float(data.x.shape[0])], dtype=count_dtype, device=data.y.device)
+
+
+def _get_training_targets(data, training_config: dict) -> torch.Tensor:
+    """Build the target tensor used for loss/evaluation from the stored dataset values."""
+    target_mode = training_config.get("energy_target_mode", "per_atom")
+    target_dtype = _get_param_dtype(training_config)
+    y = data.y.to(dtype=target_dtype)
+
+    if target_mode == "per_atom":
+        return y
+
+    if target_mode == "total":
+        num_atoms = _get_num_atoms_per_graph(data, dtype=target_dtype).view(-1, 1)
+        return y * num_atoms
+
+    raise ValueError(
+        f"Unsupported NeuralNetwork.Training.energy_target_mode={target_mode!r}. "
+        "Expected 'per_atom' or 'total'."
+    )
+
+
+def _convert_predictions_to_per_atom(pred, data):
+    """Convert graph-level total-energy predictions to per-atom values for reporting."""
+    converted_pred = []
+    for head_pred in pred:
+        num_atoms = _get_num_atoms_per_graph(data, dtype=head_pred.dtype).view(-1, 1)
+        converted_pred.append(head_pred / num_atoms)
+    return converted_pred
 
 def build_arg_parser():
     parser = argparse.ArgumentParser(
@@ -358,6 +425,11 @@ class model_ensemble(torch.nn.Module):
     ):
         super(model_ensemble, self).__init__()
         self.model_dir_list = model_dir_list
+        self.training_config = (
+            fine_tune_config.get("NeuralNetwork", {}).get("Training", {})
+            if fine_tune_config is not None
+            else {}
+        )
         self.model_ens = torch.nn.ModuleList()
         for imodel, modeldir in enumerate(self.model_dir_list):
             input_filename = os.path.join(modeldir, "config.json")
@@ -417,9 +489,13 @@ class model_ensemble(torch.nn.Module):
         return loss, tasks_loss
 
     def loss_and_backprop(self, data):
-        ntasks = data.y.shape[1]
-        device = data.y.device
-        total_tasks_loss = torch.zeros(ntasks, device=device, dtype=torch.float32)
+        target_y = _get_training_targets(data, self.training_config)
+        per_atom_target_y = data.y.to(dtype=target_y.dtype)
+        ntasks = target_y.shape[1]
+        device = target_y.device
+        total_tasks_loss = torch.zeros(ntasks, device=device, dtype=target_y.dtype)
+        total_per_atom_tasks_loss = torch.zeros(ntasks, device=device, dtype=target_y.dtype)
+        report_per_atom = self.training_config.get("energy_target_mode", "per_atom") == "total"
 
         for model in self.model_ens:
             head_index = get_head_indices(model, data)
@@ -427,7 +503,7 @@ class model_ensemble(torch.nn.Module):
 
             # handle DDP-wrapped models transparently
             loss_fn_owner = model.module if hasattr(model, "module") else model
-            loss, tasks_loss = loss_fn_owner.loss(pred, data.y.float(), head_index)  # tasks_loss shape: [ntasks]
+            loss, tasks_loss = loss_fn_owner.loss(pred, target_y, head_index)  # tasks_loss shape: [ntasks]
 
             model.zero_grad(set_to_none=True)
             loss.backward()
@@ -436,29 +512,51 @@ class model_ensemble(torch.nn.Module):
             for i, task_loss in enumerate(tasks_loss):
                 total_tasks_loss[i] += task_loss.detach().to(device)
 
+            if report_per_atom:
+                per_atom_pred = _convert_predictions_to_per_atom(pred, data)
+                _, per_atom_tasks_loss = loss_fn_owner.loss(
+                    per_atom_pred, per_atom_target_y, head_index
+                )
+                for i, task_loss in enumerate(per_atom_tasks_loss):
+                    total_per_atom_tasks_loss[i] += task_loss.detach().to(device)
+
         # if you want the ensemble average per task:
         avg_tasks_loss = total_tasks_loss / len(self.model_ens)
-        return avg_tasks_loss
+        avg_per_atom_tasks_loss = total_per_atom_tasks_loss / len(self.model_ens)
+        return avg_tasks_loss, avg_per_atom_tasks_loss
 
     def val_loss(self, data):
-        ntasks = data.y.shape[1]
-        device = data.y.device
-        total_tasks_loss = torch.zeros(ntasks, device=device, dtype=torch.float32)
+        target_y = _get_training_targets(data, self.training_config)
+        per_atom_target_y = data.y.to(dtype=target_y.dtype)
+        ntasks = target_y.shape[1]
+        device = target_y.device
+        total_tasks_loss = torch.zeros(ntasks, device=device, dtype=target_y.dtype)
+        total_per_atom_tasks_loss = torch.zeros(ntasks, device=device, dtype=target_y.dtype)
+        report_per_atom = self.training_config.get("energy_target_mode", "per_atom") == "total"
 
         for model in self.model_ens:
             head_index = get_head_indices(model, data)
             pred = model(data)
 
             loss_fn_owner = model.module if hasattr(model, "module") else model
-            _, tasks_loss = loss_fn_owner.loss(pred, data.y.float(), head_index)  # shape: [ntasks]
+            _, tasks_loss = loss_fn_owner.loss(pred, target_y, head_index)  # shape: [ntasks]
 
             # accumulate losses (detach: validation doesn’t need grads)
             for i, task_loss in enumerate(tasks_loss):
                 total_tasks_loss[i] += task_loss.detach().to(device)
 
+            if report_per_atom:
+                per_atom_pred = _convert_predictions_to_per_atom(pred, data)
+                _, per_atom_tasks_loss = loss_fn_owner.loss(
+                    per_atom_pred, per_atom_target_y, head_index
+                )
+                for i, task_loss in enumerate(per_atom_tasks_loss):
+                    total_per_atom_tasks_loss[i] += task_loss.detach().to(device)
+
         # average over ensemble
         avg_tasks_loss = total_tasks_loss / len(self.model_ens)
-        return avg_tasks_loss
+        avg_per_atom_tasks_loss = total_per_atom_tasks_loss / len(self.model_ens)
+        return avg_tasks_loss, avg_per_atom_tasks_loss
 
     def __len__(self):
         return self.model_size
@@ -476,10 +574,10 @@ def test_ensemble_jamie(model_ens, loader, dataset_name, verbosity, save_results
 
     with torch.no_grad():
         for data in iterate_tqdm(loader, verbosity):
-            data = data.to(device)
+            data = _move_batch_to_training_precision(data, model_ens.module.training_config)
             head_index = get_head_indices(model_ens.module.model_ens[0], data)
             pred_ens = model_ens(data)
-            ytrue = data.y
+            ytrue = _get_training_targets(data, model_ens.module.training_config)
 
             for ihead in range(num_heads):
                 head_val = ytrue[head_index[ihead]]
@@ -555,13 +653,13 @@ def test_ensemble(model_ens, loader, dataset_name, verbosity, save_results:bool=
     with torch.no_grad():
         # Iterate over dataloader
         for data in iterate_tqdm(loader, verbosity):
-            data=data.to(device)
+            data = _move_batch_to_training_precision(data, model_ens.module.training_config)
             data = _force_dataset_name_2d(data)
             head_index = get_head_indices(model_ens.module.model_ens[0], data)
             ###########################
             pred_ens = model_ens(data)
             ###########################
-            ytrue = data.y
+            ytrue = _get_training_targets(data, model_ens.module.training_config)
             for ihead in range(num_heads):
                 head_val = ytrue[head_index[ihead]]
                 true_values[ihead].extend(head_val)
@@ -666,37 +764,60 @@ def train_ensemble(model_ensemble, train_loader, val_loader, num_epochs, optimiz
         os.environ["HYDRAGNN_EPOCH"] = str(epoch)
         model_ensemble.train()  # Set ensemble to training mode
         epoch_loss = 0  # Track cumulative loss for the epoch
+        epoch_per_atom_loss = 0
         nbatch = get_nbatch(train_loader)
         for ibatch, batch in iterate_tqdm(
                     enumerate(train_loader), verbosity_level=2, desc="Train Ensemble", total=nbatch
             ):
             # Forward pass and backpropagation
-            batch = batch.to(get_device())
+            batch = _move_batch_to_training_precision(
+                batch, model_ensemble.module.training_config
+            )
             batch = _force_dataset_name_2d(batch)
-            total_tasks_loss = torch.atleast_1d(model_ensemble.module.loss_and_backprop(batch))
+            total_tasks_loss, total_per_atom_tasks_loss = model_ensemble.module.loss_and_backprop(batch)
+            total_tasks_loss = torch.atleast_1d(total_tasks_loss)
+            total_per_atom_tasks_loss = torch.atleast_1d(total_per_atom_tasks_loss)
             # Optimizer step for each ensemble member
             for optimizer in optimizers:
                 optimizer.step()
 
             # Optionally accumulate loss for logging
             epoch_loss += total_tasks_loss[0]
+            epoch_per_atom_loss += total_per_atom_tasks_loss[0]
 
         mean_train_loss_epoch = epoch_loss/len(train_loader)
+        mean_train_per_atom_loss_epoch = epoch_per_atom_loss/len(train_loader)
 
         #validation
         model_ensemble.eval()
         val_loss = 0
+        val_per_atom_loss = 0
         for batch in val_loader:
             #forward pass
-            batch = batch.to(get_device())
+            batch = _move_batch_to_training_precision(
+                batch, model_ensemble.module.training_config
+            )
             batch = _force_dataset_name_2d(batch)
-            total_tasks_loss = torch.atleast_1d(model_ensemble.module.val_loss(batch))
+            total_tasks_loss, total_per_atom_tasks_loss = model_ensemble.module.val_loss(batch)
+            total_tasks_loss = torch.atleast_1d(total_tasks_loss)
+            total_per_atom_tasks_loss = torch.atleast_1d(total_per_atom_tasks_loss)
             #accumulate validation loss for logging
             val_loss += total_tasks_loss[0]
+            val_per_atom_loss += total_per_atom_tasks_loss[0]
 
         mean_val_loss_epoch = val_loss/len(val_loader)
+        mean_val_per_atom_loss_epoch = val_per_atom_loss/len(val_loader)
 
-        print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {mean_train_loss_epoch:.4f}, Val Loss: {mean_val_loss_epoch:.4f}")
+        if model_ensemble.module.training_config.get("energy_target_mode", "per_atom") == "total":
+            print(
+                f"Epoch {epoch + 1}/{num_epochs}, "
+                f"Loss: {mean_train_loss_epoch:.4f} eV, "
+                f"Val Loss: {mean_val_loss_epoch:.4f} eV, "
+                f"Loss/atom: {mean_train_per_atom_loss_epoch:.4f} eV/atom, "
+                f"Val Loss/atom: {mean_val_per_atom_loss_epoch:.4f} eV/atom"
+            )
+        else:
+            print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {mean_train_loss_epoch:.4f}, Val Loss: {mean_val_loss_epoch:.4f}")
 
         # checkpoint each fine-tuned member when validation improves
         if member_checkpoints:
@@ -821,107 +942,116 @@ def run_finetune(dictionary_variables, args, freeze_conv:bool=None):
 
     # ---- load fine-tuning config ----
     ft_config = load_finetuning_config(args)
-
-    # ---- default FINETUNING_LOG_DIR if not set ----
-    finetuning_log_dir = os.getenv("FINETUNING_LOG_DIR")
-    if not finetuning_log_dir:
-        try:
-            example_dir = Path(os.path.abspath(args.finetuning_config)).parent
-            finetuning_log_dir = str(example_dir / "logs")
-        except Exception:
-            finetuning_log_dir = "./logs"
-        os.environ["FINETUNING_LOG_DIR"] = finetuning_log_dir
-    os.makedirs(finetuning_log_dir, exist_ok=True)
-
-    verbosity = ft_config["Verbosity"]["level"]
-    if args.batch_size is not None:
-        ft_config["NeuralNetwork"]["Training"]["batch_size"] = args.batch_size
-
-    # Initialize DDP/MPI
-    comm_size, rank, comm = setup_distributed_finetuning()
-
-    # ---- logging ----
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%%(levelname)s (rank %d): %%(message)s" % (rank),
-        datefmt="%H:%M:%S",
+    precision, param_dtype, _ = resolve_precision(
+        ft_config["NeuralNetwork"]["Training"].get("precision", "fp32")
     )
+    ft_config["NeuralNetwork"]["Training"]["precision"] = precision
+    previous_default_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(param_dtype)
 
-    datasetname = "FineTuning" if args.datasetname is None else args.datasetname
-    modelname = "FineTuning" if args.modelname is None else args.modelname
-    log_name = modelname
-    hydragnn.utils.print.print_utils.setup_log(log_name)
-    writer = hydragnn.utils.model.get_summary_writer(log_name, path=finetuning_log_dir)
-
-    log("Command: {0}\n".format(" ".join([x for x in sys.argv])), rank=0)
-
-    # Get model list
-    ensemble_path = Path(args.pretrained_model_ensemble_path)
-    model_dir_list = [os.path.join(ensemble_path, model_id) for model_id in os.listdir(ensemble_path)]
-
-    # Load datasets
-    trainset, valset, testset = load_datasets(args, ft_config, dictionary_variables)
-
-    # Make dataloaders
-    train_loader, val_loader, test_loader = make_dataloaders(trainset, valset, testset,
-                                                            batch_size=ft_config["NeuralNetwork"]["Training"]["batch_size"],
-                                                            ddstore=args.ddstore)
-
-    # Setup ensemble of models for fine-tuning
-    model = get_ensemble(args, ft_config, train_loader, val_loader, test_loader, freeze_conv=freeze_conv)
-
-    from utils.debug import print_model_sanity_check
-    print_model_sanity_check(model.module.model_ens[0])
-    # exit(9)
-
-    print("Created Dataloaders")
-    comm.Barrier()
-    timer.stop()
-
-    # ---- optimizers, checkpoints, train, test ----
-    optimizers = [
-        torch.optim.AdamW(
-            member.parameters(),
-            lr=ft_config["NeuralNetwork"]["Training"]["Optimizer"]["learning_rate"],
-        )
-        for member in model.module.model_ens
-    ]
-
-    # Prepare per-member checkpoints if enabled
-    member_checkpoints = None
     try:
-        save_ckpt = ft_config["NeuralNetwork"]["Training"].get("Checkpoint", False)
-    except Exception:
-        save_ckpt = False
-    if save_ckpt:
-        warmup = ft_config["NeuralNetwork"]["Training"].get("checkpoint_warmup", 0)
-        member_checkpoints = []
-        for idx, _ in enumerate(model.module.model_ens):
-            # Use the original pretrained model directory name
-            member_name = os.path.basename(model_dir_list[idx])
-            # ensure log directory exists for this member under configured logs root
-            os.makedirs(os.path.join(finetuning_log_dir, member_name), exist_ok=True)
-            member_checkpoints.append(
-                Checkpoint(
-                    name=member_name,
-                    warmup=warmup,
-                    path=finetuning_log_dir,
-                    use_deepspeed=False,
-                )
+        # ---- default FINETUNING_LOG_DIR if not set ----
+        finetuning_log_dir = os.getenv("FINETUNING_LOG_DIR")
+        if not finetuning_log_dir:
+            try:
+                example_dir = Path(os.path.abspath(args.finetuning_config)).parent
+                finetuning_log_dir = str(example_dir / "logs")
+            except Exception:
+                finetuning_log_dir = "./logs"
+            os.environ["FINETUNING_LOG_DIR"] = finetuning_log_dir
+        os.makedirs(finetuning_log_dir, exist_ok=True)
+
+        verbosity = ft_config["Verbosity"]["level"]
+        if args.batch_size is not None:
+            ft_config["NeuralNetwork"]["Training"]["batch_size"] = args.batch_size
+
+        # Initialize DDP/MPI
+        comm_size, rank, comm = setup_distributed_finetuning()
+
+        # ---- logging ----
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%%(levelname)s (rank %d): %%(message)s" % (rank),
+            datefmt="%H:%M:%S",
+        )
+
+        datasetname = "FineTuning" if args.datasetname is None else args.datasetname
+        modelname = "FineTuning" if args.modelname is None else args.modelname
+        log_name = modelname
+        hydragnn.utils.print.print_utils.setup_log(log_name)
+        writer = hydragnn.utils.model.get_summary_writer(log_name, path=finetuning_log_dir)
+
+        log("Command: {0}\n".format(" ".join([x for x in sys.argv])), rank=0)
+
+        # Get model list
+        ensemble_path = Path(args.pretrained_model_ensemble_path)
+        model_dir_list = [os.path.join(ensemble_path, model_id) for model_id in os.listdir(ensemble_path)]
+
+        # Load datasets
+        trainset, valset, testset = load_datasets(args, ft_config, dictionary_variables)
+
+        # Make dataloaders
+        train_loader, val_loader, test_loader = make_dataloaders(trainset, valset, testset,
+                                                                batch_size=ft_config["NeuralNetwork"]["Training"]["batch_size"],
+                                                                ddstore=args.ddstore)
+
+        # Setup ensemble of models for fine-tuning
+        model = get_ensemble(args, ft_config, train_loader, val_loader, test_loader, freeze_conv=freeze_conv)
+
+        from utils.debug import print_model_sanity_check
+        print_model_sanity_check(model.module.model_ens[0])
+        # exit(9)
+
+        print("Created Dataloaders")
+        comm.Barrier()
+        timer.stop()
+
+        # ---- optimizers, checkpoints, train, test ----
+        optimizers = [
+            torch.optim.AdamW(
+                member.parameters(),
+                lr=ft_config["NeuralNetwork"]["Training"]["Optimizer"]["learning_rate"],
             )
+            for member in model.module.model_ens
+        ]
 
-    train_ensemble(
-        model,
-        train_loader,
-        val_loader,
-        num_epochs=ft_config["NeuralNetwork"]["Training"]["num_epoch"],
-        optimizers=optimizers,
-        device="cuda",
-        member_checkpoints=member_checkpoints,
-    )
+        # Prepare per-member checkpoints if enabled
+        member_checkpoints = None
+        try:
+            save_ckpt = ft_config["NeuralNetwork"]["Training"].get("Checkpoint", False)
+        except Exception:
+            save_ckpt = False
+        if save_ckpt:
+            warmup = ft_config["NeuralNetwork"]["Training"].get("checkpoint_warmup", 0)
+            member_checkpoints = []
+            for idx, _ in enumerate(model.module.model_ens):
+                # Use the original pretrained model directory name
+                member_name = os.path.basename(model_dir_list[idx])
+                # ensure log directory exists for this member under configured logs root
+                os.makedirs(os.path.join(finetuning_log_dir, member_name), exist_ok=True)
+                member_checkpoints.append(
+                    Checkpoint(
+                        name=member_name,
+                        warmup=warmup,
+                        path=finetuning_log_dir,
+                        use_deepspeed=False,
+                    )
+                )
 
-    # Test the ensemble
-    test_ensemble(model, test_loader, modelname, verbosity=2, save_results=True)
+        train_ensemble(
+            model,
+            train_loader,
+            val_loader,
+            num_epochs=ft_config["NeuralNetwork"]["Training"]["num_epoch"],
+            optimizers=optimizers,
+            device="cuda",
+            member_checkpoints=member_checkpoints,
+        )
 
-    # Optional: return something useful (e.g., final metrics)
-    return True
+        # Test the ensemble
+        test_ensemble(model, test_loader, modelname, verbosity=2, save_results=True)
+
+        # Optional: return something useful (e.g., final metrics)
+        return True
+    finally:
+        torch.set_default_dtype(previous_default_dtype)
