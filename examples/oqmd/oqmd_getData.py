@@ -75,13 +75,15 @@ class GraphBuilder:
             
             # Feature vector
             x = torch.cat([atomic_numbers, coords], dim=1) 
+            graph_attr = torch.tensor([0.0, 1.0], dtype=torch.float32)
             
             data = Data(
                 x=x,
                 y=energy,
                 pos=coords,
                 atomic_number=atomic_numbers,
-                energy=energy
+                energy=energy,
+                graph_attr=graph_attr,
             )
 
             data.pbc = [True, True, True] 

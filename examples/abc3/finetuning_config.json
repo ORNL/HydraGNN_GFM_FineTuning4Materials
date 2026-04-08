@@ -12,10 +12,9 @@
                         "architecture": {
                             "dim_pretrained": 50,
                             "num_sharedlayers": 2,
-                            "dim_sharedlayers": 5,
-                            "num_headlayers": 2,
+                            "dim_sharedlayers": 50,
+                            "num_headlayers": 1,
                             "dim_headlayers": [
-                                50,
                                 25
                             ]
                         }
@@ -39,11 +38,12 @@
             "denormalize_output": false
         },
         "Training": {
-            "Checkpoint" : true,
+            "Checkpoint" : false,
             "num_epoch": 100,
             "perc_train": 0.7,
             "loss_function_types": ["mae"],
             "batch_size": 32,
+            "train_from_scratch": true,
             "continue": 0,
             "startfrom": "existing_model",
             "Optimizer": {

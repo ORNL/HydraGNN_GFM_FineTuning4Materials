@@ -79,6 +79,11 @@ def build_arg_parser():
     parser.add_argument("--datasetname", help="dataset name")
     parser.add_argument("--modelname", help="model name")
     parser.add_argument("--batch_size", type=int, help="batch_size", default=None)
+    parser.add_argument(
+        "--train_from_scratch",
+        action="store_true",
+        help="skip loading pretrained checkpoints and initialize the fine-tuning model weights from scratch",
+    )
 
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
@@ -341,7 +346,16 @@ def update_GFM_2024_checkpoint(
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
 class model_ensemble(torch.nn.Module):
-    def __init__(self, model_dir_list, modelname=None, dir_extra="", verbosity=1, fine_tune_config = None, GFM_2024=False):
+    def __init__(
+        self,
+        model_dir_list,
+        modelname=None,
+        dir_extra="",
+        verbosity=1,
+        fine_tune_config=None,
+        GFM_2024=False,
+        train_from_scratch=False,
+    ):
         super(model_ensemble, self).__init__()
         self.model_dir_list = model_dir_list
         self.model_ens = torch.nn.ModuleList()
@@ -354,18 +368,17 @@ class model_ensemble(torch.nn.Module):
                 verbosity=verbosity,
             )
             model = hydragnn.utils.distributed.get_distributed_model(model, verbosity)
-            # Print details of neural network architecture
-            # print("Loading model %d, %s"%(imodel, modeldir))
-            if modelname is None:
-                if not GFM_2024:
-                    hydragnn.utils.model.load_existing_model(model, os.path.basename(modeldir), path=os.path.dirname(modeldir))
+            if not train_from_scratch:
+                if modelname is None:
+                    if not GFM_2024:
+                        hydragnn.utils.model.load_existing_model(model, os.path.basename(modeldir), path=os.path.dirname(modeldir))
+                    else:
+                        update_GFM_2024_checkpoint(model, os.path.basename(modeldir), path=os.path.dirname(modeldir))
                 else:
-                    update_GFM_2024_checkpoint(model, os.path.basename(modeldir), path=os.path.dirname(modeldir))
-            else:
-                if not GFM_2024:
-                    hydragnn.utils.model.load_existing_model(model, modelname, path=modeldir+dir_extra)
-                else:
-                    update_GFM_2024_checkpoint(model, os.path.basename(modeldir), path=os.path.dirname(modeldir))
+                    if not GFM_2024:
+                        hydragnn.utils.model.load_existing_model(model, modelname, path=modeldir+dir_extra)
+                    else:
+                        update_GFM_2024_checkpoint(model, os.path.basename(modeldir), path=os.path.dirname(modeldir))
 
             if fine_tune_config is not None:
                 model = model.module
@@ -721,6 +734,9 @@ def load_datasets(args, ft_config, dictionary_variables):
     var_config["graph_feature_dims"] = dictionary_variables['graph_feature_dims']
     var_config["node_feature_names"] = dictionary_variables['node_feature_names']
     var_config["node_feature_dims"] = dictionary_variables['node_feature_dims']
+    # New foundation-model checkpoints expect the node feature tensor to contain
+    # only atomic number. Positional information is read from `data.pos`.
+    var_config["input_node_features"] = [0]
 
     # Load based on format
     if args.format == "adios":
@@ -773,7 +789,15 @@ def get_ensemble(args, ft_config, train_loader, val_loader, test_loader, freeze_
         for modeldir in model_dir_list:
             update_config_frozen_conv(os.path.join(modeldir, "config.json"), freeze_val=freeze_conv)
 
-    model = model_ensemble(model_dir_list, fine_tune_config=ft_config, GFM_2024=True)
+    train_from_scratch = args.train_from_scratch or ft_config["NeuralNetwork"]["Training"].get(
+        "train_from_scratch", False
+    )
+    model = model_ensemble(
+        model_dir_list,
+        fine_tune_config=ft_config,
+        GFM_2024=True,
+        train_from_scratch=train_from_scratch,
+    )
     model = get_distributed_model(model, verbosity=2)
 
     return model
@@ -846,13 +870,17 @@ def run_finetune(dictionary_variables, args, freeze_conv:bool=None):
     # Setup ensemble of models for fine-tuning
     model = get_ensemble(args, ft_config, train_loader, val_loader, test_loader, freeze_conv=freeze_conv)
 
+    from utils.debug import print_model_sanity_check
+    print_model_sanity_check(model.module.model_ens[0])
+    # exit(9)
+
     print("Created Dataloaders")
     comm.Barrier()
     timer.stop()
 
     # ---- optimizers, checkpoints, train, test ----
     optimizers = [
-        torch.optim.Adam(
+        torch.optim.AdamW(
             member.parameters(),
             lr=ft_config["NeuralNetwork"]["Training"]["Optimizer"]["learning_rate"],
         )

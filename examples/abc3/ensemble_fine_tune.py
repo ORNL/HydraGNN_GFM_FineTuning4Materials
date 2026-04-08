@@ -14,7 +14,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # The paths below assume that you are running this script from the root directory.
-    args.pretrained_model_ensemble_path = './pretrained_model_ensemble'
+    args.pretrained_model_ensemble_path = './pretrained_model_ensemble_2026'
     args.finetuning_config = './examples/abc3/finetuning_config.json'
     args.datasetname = 'abc3'
     args.modelname = 'abc3'
