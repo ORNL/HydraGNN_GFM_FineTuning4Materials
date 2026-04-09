@@ -158,8 +158,11 @@ def build_scratch_model(pretrained_config, ft_config):
     return model
 
 
+KCAL_PER_EV = 23.0609
+
+
 def train_loop(model, train_loader, val_loader, num_epochs, optimizer, precision):
-    """Train for num_epochs, return list of per-epoch val MAE.
+    """Train for num_epochs, return dict with per-epoch val MAE and RMSE (in eV).
 
     Uses HydraGNN's precision infrastructure:
     - resolve_precision() for param_dtype
@@ -168,7 +171,8 @@ def train_loop(model, train_loader, val_loader, num_epochs, optimizer, precision
     """
     prec, param_dtype, _ = resolve_precision(precision)
     autocast_ctx, scaler = get_autocast_and_scaler(prec)
-    val_history = []
+    mae_history = []
+    rmse_history = []
 
     for epoch in range(num_epochs):
         os.environ["HYDRAGNN_EPOCH"] = str(epoch)
@@ -200,7 +204,8 @@ def train_loop(model, train_loader, val_loader, num_epochs, optimizer, precision
 
         # ----- Validate -----
         model.eval()
-        val_loss = 0.0
+        all_pred = []
+        all_true = []
         with torch.no_grad():
             for batch in val_loader:
                 batch = _force_dataset_name_2d(batch)
@@ -210,17 +215,28 @@ def train_loop(model, train_loader, val_loader, num_epochs, optimizer, precision
                 head_index = get_head_indices(model, batch)
                 with autocast_ctx:
                     pred = model(batch)
-                    loss_fn_owner = model.module if hasattr(model, "module") else model
-                    _, tasks_loss = loss_fn_owner.loss(pred, batch.y, head_index)
-                val_loss += float(torch.atleast_1d(tasks_loss)[0].detach().cpu())
+                # Collect predictions and targets for head 0
+                head_pred = pred[0].detach().cpu().float().view(-1)
+                head_true = batch.y[head_index[0]].detach().cpu().float().view(-1)
+                all_pred.append(head_pred)
+                all_true.append(head_true)
 
-        mean_val = val_loss / len(val_loader)
-        val_history.append(mean_val)
+        all_pred = torch.cat(all_pred)
+        all_true = torch.cat(all_true)
+        errors = all_pred - all_true
+        val_mae = float(errors.abs().mean())
+        val_rmse = float((errors**2).mean().sqrt())
+        mae_history.append(val_mae)
+        rmse_history.append(val_rmse)
 
         if (epoch + 1) % 50 == 0 or epoch == 0:
-            print(f"    Epoch {epoch+1:4d}/{num_epochs}  Train MAE: {mean_train:.4f}  Val MAE: {mean_val:.4f}")
+            print(
+                f"    Epoch {epoch+1:4d}/{num_epochs}"
+                f"  Train MAE: {mean_train:.4f}"
+                f"  Val MAE: {val_mae:.4f}  Val RMSE: {val_rmse:.4f}"
+            )
 
-    return val_history
+    return {"mae": mae_history, "rmse": rmse_history}
 
 
 def run_experiment(strategy, precision_name, ft_config, pretrained_config, train_loader, val_loader):
@@ -256,19 +272,22 @@ def run_experiment(strategy, precision_name, ft_config, pretrained_config, train
 
     optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=wd)
 
-    val_history = train_loop(model, train_loader, val_loader, NUM_EPOCHS, optimizer, prec)
+    history = train_loop(model, train_loader, val_loader, NUM_EPOCHS, optimizer, prec)
 
-    best_val = min(val_history)
-    best_epoch = val_history.index(best_val) + 1
-    print(f"  Best Val MAE: {best_val:.4f} eV ({best_val * 23.0609:.2f} kcal/mol) at epoch {best_epoch}")
+    best_mae = min(history["mae"])
+    best_mae_epoch = history["mae"].index(best_mae) + 1
+    best_rmse = min(history["rmse"])
+    best_rmse_epoch = history["rmse"].index(best_rmse) + 1
+    print(
+        f"  Best Val MAE:  {best_mae:.4f} eV ({best_mae * KCAL_PER_EV:.2f} kcal/mol) at epoch {best_mae_epoch}\n"
+        f"  Best Val RMSE: {best_rmse:.4f} eV ({best_rmse * KCAL_PER_EV:.2f} kcal/mol) at epoch {best_rmse_epoch}"
+    )
 
-    return val_history
+    return history
 
 
-def plot_fp64_curves(results, output_path):
-    """Plot validation MAE vs epoch for the three FP64 strategies."""
-    fig, ax = plt.subplots(figsize=(8, 5))
-
+def plot_fp64_curves(results, output_dir):
+    """Plot validation MAE and RMSE vs epoch for the three FP64 strategies."""
     labels = {
         "frozen": "Fine-tuning (frozen backbone)",
         "unfrozen": "Fine-tuning (unfrozen backbone)",
@@ -280,22 +299,29 @@ def plot_fp64_curves(results, output_path):
         "scratch": "#2ca02c",
     }
 
-    for strategy in ("frozen", "unfrozen", "scratch"):
-        key = f"{strategy}_fp64"
-        if key not in results:
-            continue
-        hist = results[key]
-        epochs = list(range(1, len(hist) + 1))
-        ax.plot(epochs, hist, label=labels[strategy], color=colors[strategy], linewidth=1.2)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    ax.set_xlabel("Epoch", fontsize=13)
-    ax.set_ylabel("Validation MAE (eV)", fontsize=13)
-    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-    ax.legend(fontsize=11)
-    ax.grid(True, alpha=0.3)
+    for ax, metric, ylabel in zip(
+        axes, ("mae", "rmse"), ("Validation MAE (eV)", "Validation RMSE (eV)")
+    ):
+        for strategy in ("frozen", "unfrozen", "scratch"):
+            key = f"{strategy}_fp64"
+            if key not in results:
+                continue
+            hist = results[key][metric]
+            epochs = list(range(1, len(hist) + 1))
+            ax.plot(epochs, hist, label=labels[strategy], color=colors[strategy], linewidth=1.2)
+
+        ax.set_xlabel("Epoch", fontsize=13)
+        ax.set_ylabel(ylabel, fontsize=13)
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.legend(fontsize=10)
+        ax.grid(True, alpha=0.3)
+
     fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
-    print(f"\nPlot saved to {output_path}")
+    plot_path = os.path.join(output_dir, "fp64_validation_mae_rmse.png")
+    fig.savefig(plot_path, dpi=150)
+    print(f"\nPlot saved to {plot_path}")
     plt.close(fig)
 
 
@@ -331,11 +357,19 @@ def main():
     # Save all results to JSON
     summary = {}
     for key, hist in results.items():
+        mae_list = hist["mae"]
+        rmse_list = hist["rmse"]
+        best_mae = min(mae_list)
+        best_rmse = min(rmse_list)
         summary[key] = {
-            "best_val_mae_eV": min(hist),
-            "best_epoch": hist.index(min(hist)) + 1,
-            "best_val_mae_kcal_mol": min(hist) * 23.0609,
-            "final_val_mae_eV": hist[-1],
+            "best_val_mae_eV": best_mae,
+            "best_mae_epoch": mae_list.index(best_mae) + 1,
+            "best_val_mae_kcal_mol": best_mae * KCAL_PER_EV,
+            "best_val_rmse_eV": best_rmse,
+            "best_rmse_epoch": rmse_list.index(best_rmse) + 1,
+            "best_val_rmse_kcal_mol": best_rmse * KCAL_PER_EV,
+            "final_val_mae_eV": mae_list[-1],
+            "final_val_rmse_eV": rmse_list[-1],
         }
     summary_path = os.path.join(OUTPUT_DIR, "benchmark_summary.json")
     with open(summary_path, "w") as f:
@@ -349,18 +383,19 @@ def main():
     print(f"Per-epoch histories saved to {history_path}")
 
     # Plot FP64 curves
-    plot_path = os.path.join(OUTPUT_DIR, "fp64_validation_mae.png")
-    plot_fp64_curves(results, plot_path)
+    plot_fp64_curves(results, OUTPUT_DIR)
 
     # Print final summary table
-    print(f"\n{'Strategy':<30s}  {'Precision':<6s}  {'Best Val MAE (eV)':>18s}  {'(kcal/mol)':>12s}  {'Epoch':>5s}")
-    print("-" * 80)
+    print(f"\n{'Strategy':<22s}  {'Prec':<5s}  {'MAE(eV)':>8s}  {'MAE(kcal)':>10s}  {'Ep':>4s}  {'RMSE(eV)':>9s}  {'RMSE(kcal)':>11s}  {'Ep':>4s}")
+    print("-" * 90)
     for prec_name in precisions:
         for strategy in strategies:
             key = f"{strategy}_{prec_name}"
             s = summary[key]
             print(
-                f"{strategy:<30s}  {prec_name:<6s}  {s['best_val_mae_eV']:18.4f}  {s['best_val_mae_kcal_mol']:12.2f}  {s['best_epoch']:5d}"
+                f"{strategy:<22s}  {prec_name:<5s}"
+                f"  {s['best_val_mae_eV']:8.4f}  {s['best_val_mae_kcal_mol']:10.2f}  {s['best_mae_epoch']:4d}"
+                f"  {s['best_val_rmse_eV']:9.4f}  {s['best_val_rmse_kcal_mol']:11.2f}  {s['best_rmse_epoch']:4d}"
             )
 
 
