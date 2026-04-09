@@ -139,9 +139,31 @@ def download_wiggle150_xyz(url=WIGGLE150_URL, out_path=RAW_XYZ_PATH):
     return out_path
 
 
-def load_wiggle150_xyz(xyz_path):
-    """Parse multi-frame XYZ into torch_geometric Data objects."""
-    dataset = []
+def _extract_molecule_prefix(comment):
+    """Extract molecule prefix (e.g. 'ado' from 'ado_00 -603984.7...')."""
+    label = comment.split()[0] if comment.split() else ""
+    # Strip trailing _NN index to get the molecule type
+    prefix = re.sub(r"_\d+$", "", label)
+    return prefix
+
+
+KCAL_MOL_PER_EV = 23.0609  # 1 eV = 23.0609 kcal/mol
+
+
+def load_wiggle150_xyz(xyz_path, relative_energies=True, convert_to_eV=True):
+    """Parse multi-frame XYZ into torch_geometric Data objects.
+
+    If *relative_energies* is True (default), each conformer's energy is
+    expressed relative to the lowest-energy (ground-state) conformer of
+    the same molecule, following the Wiggle150 paper convention.  This
+    brings targets from O(10^5) kcal/mol down to O(10^2) kcal/mol.
+
+    If *convert_to_eV* is True (default), energies are converted from
+    kcal/mol to eV so they match the unit the pretrained GFM backbone
+    was trained on.
+    """
+    # First pass: collect raw frames
+    raw_frames = []
     with open(xyz_path, "r") as f:
         while True:
             first = f.readline()
@@ -169,19 +191,46 @@ def load_wiggle150_xyz(xyz_path):
                 pos_list.append([float(parts[1]), float(parts[2]), float(parts[3])])
 
             energy = parse_energy_from_comment(comment)
-            y = torch.tensor([energy if energy is not None else 0.0], dtype=torch.float)
+            mol_prefix = _extract_molecule_prefix(comment)
+            raw_frames.append((z_list, pos_list, energy, mol_prefix, comment))
 
-            # Concatenate atomic numbers and positions into x
-            atomic_nums = torch.tensor(z_list, dtype=torch.float).view(-1, 1)
-            positions = torch.tensor(pos_list, dtype=torch.float)
-            x = torch.cat((atomic_nums, positions), dim=1)
+    # Compute per-molecule ground-state (minimum) energies for relative mode
+    if relative_energies:
+        from collections import defaultdict
+        mol_energies = defaultdict(list)
+        for _, _, energy, mol_prefix, _ in raw_frames:
+            if energy is not None:
+                mol_energies[mol_prefix].append(energy)
+        mol_ground = {mol: min(vals) for mol, vals in mol_energies.items()}
+        print(f"Per-molecule ground-state energies (kcal/mol): {mol_ground}")
 
-            data = Data(
-                x=x,
-                pos=positions,
-                y=y,
-            )
-            dataset.append(data)
+    # Second pass: build Data objects
+    dataset = []
+    for z_list, pos_list, energy, mol_prefix, comment in raw_frames:
+        if energy is not None and relative_energies and mol_prefix in mol_ground:
+            energy = energy - mol_ground[mol_prefix]
+        if energy is not None and convert_to_eV:
+            energy = energy / KCAL_MOL_PER_EV
+        y = torch.tensor([energy if energy is not None else 0.0], dtype=torch.float)
+
+        atomic_nums = torch.tensor(z_list, dtype=torch.float).view(-1, 1)
+        positions = torch.tensor(pos_list, dtype=torch.float)
+
+        # charge=0, spin=1 for all wiggle150 molecules
+        graph_attr = torch.tensor([0.0, 1.0], dtype=torch.float)
+
+        data = Data(
+            x=atomic_nums,
+            pos=positions,
+            y=y,
+            graph_attr=graph_attr,
+        )
+        dataset.append(data)
+
+    unit = "eV" if convert_to_eV else "kcal/mol"
+    all_y = [d.y.item() for d in dataset]
+    print(f"Target stats ({unit}): min={min(all_y):.4f}, max={max(all_y):.4f}, "
+          f"mean={sum(all_y)/len(all_y):.4f}, n={len(all_y)}")
     return dataset
 
 
