@@ -39,16 +39,21 @@
             "denormalize_output": false
         },
         "Training": {
-            "Checkpoint" : true,
+            "Checkpoint" : false,
             "num_epoch": 100,
             "perc_train": 0.7,
+            "precision": "bf16",
+            "energy_target_mode": "total",
             "loss_function_types": ["mae"],
             "batch_size": 32,
+            "train_from_scratch": false,
+            "keep_pretrained_decoder": false,
+            "freeze_mode": "None",
             "continue": 0,
             "startfrom": "existing_model",
             "Optimizer": {
                 "type": "AdamW",
-                "learning_rate": 1e-3
+                "learning_rate": 1.0e-4
             }
         }
     },

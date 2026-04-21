@@ -42,6 +42,7 @@ import hydragnn.utils.profiling_and_tracing.tracer as tr
 
 from hydragnn.train.train_validate_test import (
     gather_tensor_ranks,
+    get_autocast_and_scaler,
     get_head_indices,
     get_nbatch,
     reduce_values_ranks,
@@ -67,6 +68,14 @@ def _get_param_dtype(training_config: dict) -> torch.dtype:
     """Resolve the parameter dtype configured for fine-tuning."""
     _, param_dtype, _ = resolve_precision(training_config.get("precision", "fp32"))
     return param_dtype
+
+
+def _get_training_autocast(training_config: dict):
+    """Return the autocast context configured for fine-tuning precision."""
+    autocast_context, _ = get_autocast_and_scaler(
+        training_config.get("precision", "fp32")
+    )
+    return autocast_context
 
 
 def _move_batch_to_training_precision(data, training_config: dict):
@@ -496,14 +505,16 @@ class model_ensemble(torch.nn.Module):
         total_tasks_loss = torch.zeros(ntasks, device=device, dtype=target_y.dtype)
         total_per_atom_tasks_loss = torch.zeros(ntasks, device=device, dtype=target_y.dtype)
         report_per_atom = self.training_config.get("energy_target_mode", "per_atom") == "total"
-
         for model in self.model_ens:
             head_index = get_head_indices(model, data)
-            pred = model(data)
-
-            # handle DDP-wrapped models transparently
             loss_fn_owner = model.module if hasattr(model, "module") else model
-            loss, tasks_loss = loss_fn_owner.loss(pred, target_y, head_index)  # tasks_loss shape: [ntasks]
+
+            # Run forward/loss under the configured autocast mode when enabled.
+            with _get_training_autocast(self.training_config):
+                pred = model(data)
+                loss, tasks_loss = loss_fn_owner.loss(
+                    pred, target_y, head_index
+                )  # tasks_loss shape: [ntasks]
 
             model.zero_grad(set_to_none=True)
             loss.backward()
@@ -514,9 +525,10 @@ class model_ensemble(torch.nn.Module):
 
             if report_per_atom:
                 per_atom_pred = _convert_predictions_to_per_atom(pred, data)
-                _, per_atom_tasks_loss = loss_fn_owner.loss(
-                    per_atom_pred, per_atom_target_y, head_index
-                )
+                with _get_training_autocast(self.training_config):
+                    _, per_atom_tasks_loss = loss_fn_owner.loss(
+                        per_atom_pred, per_atom_target_y, head_index
+                    )
                 for i, task_loss in enumerate(per_atom_tasks_loss):
                     total_per_atom_tasks_loss[i] += task_loss.detach().to(device)
 
@@ -533,13 +545,14 @@ class model_ensemble(torch.nn.Module):
         total_tasks_loss = torch.zeros(ntasks, device=device, dtype=target_y.dtype)
         total_per_atom_tasks_loss = torch.zeros(ntasks, device=device, dtype=target_y.dtype)
         report_per_atom = self.training_config.get("energy_target_mode", "per_atom") == "total"
-
         for model in self.model_ens:
             head_index = get_head_indices(model, data)
-            pred = model(data)
-
             loss_fn_owner = model.module if hasattr(model, "module") else model
-            _, tasks_loss = loss_fn_owner.loss(pred, target_y, head_index)  # shape: [ntasks]
+            with _get_training_autocast(self.training_config):
+                pred = model(data)
+                _, tasks_loss = loss_fn_owner.loss(
+                    pred, target_y, head_index
+                )  # shape: [ntasks]
 
             # accumulate losses (detach: validation doesn’t need grads)
             for i, task_loss in enumerate(tasks_loss):
@@ -547,9 +560,10 @@ class model_ensemble(torch.nn.Module):
 
             if report_per_atom:
                 per_atom_pred = _convert_predictions_to_per_atom(pred, data)
-                _, per_atom_tasks_loss = loss_fn_owner.loss(
-                    per_atom_pred, per_atom_target_y, head_index
-                )
+                with _get_training_autocast(self.training_config):
+                    _, per_atom_tasks_loss = loss_fn_owner.loss(
+                        per_atom_pred, per_atom_target_y, head_index
+                    )
                 for i, task_loss in enumerate(per_atom_tasks_loss):
                     total_per_atom_tasks_loss[i] += task_loss.detach().to(device)
 
@@ -576,7 +590,8 @@ def test_ensemble_jamie(model_ens, loader, dataset_name, verbosity, save_results
         for data in iterate_tqdm(loader, verbosity):
             data = _move_batch_to_training_precision(data, model_ens.module.training_config)
             head_index = get_head_indices(model_ens.module.model_ens[0], data)
-            pred_ens = model_ens(data)
+            with _get_training_autocast(model_ens.module.training_config):
+                pred_ens = model_ens(data)
             ytrue = _get_training_targets(data, model_ens.module.training_config)
 
             for ihead in range(num_heads):
@@ -657,7 +672,8 @@ def test_ensemble(model_ens, loader, dataset_name, verbosity, save_results:bool=
             data = _force_dataset_name_2d(data)
             head_index = get_head_indices(model_ens.module.model_ens[0], data)
             ###########################
-            pred_ens = model_ens(data)
+            with _get_training_autocast(model_ens.module.training_config):
+                pred_ens = model_ens(data)
             ###########################
             ytrue = _get_training_targets(data, model_ens.module.training_config)
             for ihead in range(num_heads):
@@ -811,13 +827,17 @@ def train_ensemble(model_ensemble, train_loader, val_loader, num_epochs, optimiz
         if model_ensemble.module.training_config.get("energy_target_mode", "per_atom") == "total":
             print(
                 f"Epoch {epoch + 1}/{num_epochs}, "
-                f"Loss: {mean_train_loss_epoch:.4f} eV, "
-                f"Val Loss: {mean_val_loss_epoch:.4f} eV, "
-                f"Loss/atom: {mean_train_per_atom_loss_epoch:.4f} eV/atom, "
-                f"Val Loss/atom: {mean_val_per_atom_loss_epoch:.4f} eV/atom"
+                f"Train MAE: {mean_train_loss_epoch:.4f} eV, "
+                f"Val MAE: {mean_val_loss_epoch:.4f} eV, "
+                f"Train MAE/atom: {mean_train_per_atom_loss_epoch:.4f} eV/atom, "
+                f"Val MAE/atom: {mean_val_per_atom_loss_epoch:.4f} eV/atom"
             )
         else:
-            print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {mean_train_loss_epoch:.4f}, Val Loss: {mean_val_loss_epoch:.4f}")
+            print(
+                f"Epoch {epoch + 1}/{num_epochs}, "
+                f"Train MAE: {mean_train_loss_epoch:.4f}, "
+                f"Val MAE: {mean_val_loss_epoch:.4f}"
+            )
 
         # checkpoint each fine-tuned member when validation improves
         if member_checkpoints:
