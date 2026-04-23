@@ -1,0 +1,18 @@
+{
+  "frozen": {
+    "best_energy_mae_eV": 0.1852787882089615,
+    "best_energy_mae_kcal_mol": 4.27269560700804,
+    "best_energy_epoch": 97,
+    "best_force_mae_eV_A": 0.5921499729156494,
+    "best_force_mae_kcal_mol_A": 13.6555113104105,
+    "best_force_epoch": 95
+  },
+  "unfrozen": {
+    "best_energy_mae_eV": 0.06407544016838074,
+    "best_energy_mae_kcal_mol": 1.4776373181790114,
+    "best_energy_epoch": 100,
+    "best_force_mae_eV_A": 0.28373053669929504,
+    "best_force_mae_kcal_mol_A": 6.543081533768773,
+    "best_force_epoch": 92
+  }
+}
