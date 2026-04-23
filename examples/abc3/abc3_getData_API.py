@@ -25,15 +25,15 @@ def get_csv_from_url():
     return df
 
 # Create HydraGNN dataset
-def create_dataset_from_csv(df):
+def create_dataset_from_csv():
     # Get csv
     df = get_csv_from_url()
     
     # Clean column names (strip whitespace)
     df.columns = df.columns.str.strip()
     
-    # Map mp_id to target property (formation energy)
-    # Note: Trust dataset (csv) values
+    # Map mp_id to target property in eV/atom.
+    # Note: trust dataset (csv) values as provided.
     id_to_energy = dict(zip(df['mp_id'], df['formation_energy (eV/atom)']))
     target_ids = list(df['mp_id'].unique())
     print(f"Found {len(target_ids)} unique materials. Fetching structures from MP API...")
@@ -87,7 +87,8 @@ def create_dataset_from_csv(df):
         # Make input vector
         atom_numbers = torch.tensor(atomic_numbers.view(-1, 1).float()) # Reshape to [num_atoms, 1]
         x = torch.cat([atom_numbers, coords], dim=1)
-        y = torch.tensor([y_value])
+        y = torch.tensor([y_value], dtype=torch.float32)
+        graph_attr = torch.tensor([0.0, 1.0], dtype=torch.float32)
              
         # Make object
         data = Data(
@@ -95,7 +96,8 @@ def create_dataset_from_csv(df):
             y=y,
             pos=coords,
             atomic_number=atom_numbers,
-            energy=y
+            energy=y,
+            graph_attr=graph_attr,
         )
 
         # Add periodic condition

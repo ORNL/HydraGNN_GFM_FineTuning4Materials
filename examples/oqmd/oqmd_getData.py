@@ -75,13 +75,15 @@ class GraphBuilder:
             
             # Feature vector
             x = torch.cat([atomic_numbers, coords], dim=1) 
+            graph_attr = torch.tensor([0.0, 1.0], dtype=torch.float32)
             
             data = Data(
                 x=x,
                 y=energy,
                 pos=coords,
                 atomic_number=atomic_numbers,
-                energy=energy
+                energy=energy,
+                graph_attr=graph_attr,
             )
 
             data.pbc = [True, True, True] 
@@ -130,7 +132,7 @@ def main():
     print("--- Loading Targets ---")
     df = pd.read_csv(CSV_URL)
     
-    # Create a set for lookup (using the Ef [formation energy] from the github csv)
+    # Create a set for lookup and store the target in eV/atom.
     target_map = pd.Series(df.Ef.values, index=df.entry_id).to_dict()
     total_targets = len(target_map)
     print(f"Looking for {total_targets} specific IDs.")
