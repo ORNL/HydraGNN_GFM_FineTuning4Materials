@@ -56,8 +56,9 @@ except ImportError:
 
 import torch
 import glob, re
+from sklearn.metrics import roc_auc_score, balanced_accuracy_score, f1_score
 
-def update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader):
+def update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader, checkpoint_dir, checkpoint_path, GFM_2024=False):
     for imodel, modeldir in enumerate(model_dir_list):
         input_filename = os.path.join(modeldir, "config.json")
         with open(input_filename, "r") as f:
@@ -94,11 +95,16 @@ def update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader
         if "compute_grad_energy" not in config["NeuralNetwork"]["Training"]:
             config["NeuralNetwork"]["Training"]["compute_grad_energy"] = False
 
-        config["NeuralNetwork"]["Architecture"]["input_dim"] = len(
-            config["NeuralNetwork"]["Variables_of_interest"]["input_node_features"]
+        if GFM_2024:
+            config["NeuralNetwork"]["Architecture"]["input_dim"] = len(
+                config["NeuralNetwork"]["Variables_of_interest"]["input_node_features"]
         )
+        else:
+            config["NeuralNetwork"]["Architecture"]["input_dim"] = len(
+                  config["NeuralNetwork"]["Variables_of_interest"].get("input_node_features", [0])
+          )
         PNA_models = ["PNA", "PNAPlus", "PNAEq"]
-        if config["NeuralNetwork"]["Architecture"]["model_type"] in PNA_models:
+        if config["NeuralNetwork"]["Architecture"]["mpnn_type"] in PNA_models:
             if hasattr(train_loader.dataset, "pna_deg"):
                 ## Use max neighbours used in the datasets.
                 deg = torch.tensor(train_loader.dataset.pna_deg)
@@ -111,14 +117,14 @@ def update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader
 
         # Set CGCNN hidden dim to input dim if global attention is not being used
         if (
-                config["NeuralNetwork"]["Architecture"]["model_type"] == "CGCNN"
+                config["NeuralNetwork"]["Architecture"]["mpnn_type"] == "CGCNN"
                 and not config["NeuralNetwork"]["Architecture"]["global_attn_engine"]
         ):
             config["NeuralNetwork"]["Architecture"]["hidden_dim"] = config["NeuralNetwork"][
                 "Architecture"
             ]["input_dim"]
 
-        if config["NeuralNetwork"]["Architecture"]["model_type"] == "MACE":
+        if config["NeuralNetwork"]["Architecture"]["mpnn_type"] == "MACE":
             if hasattr(train_loader.dataset, "avg_num_neighbors"):
                 ## Use avg neighbours used in the dataset.
                 avg_num_neighbors = torch.tensor(train_loader.dataset.avg_num_neighbors)
@@ -191,7 +197,42 @@ def update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader
         if "Optimizer" not in config["NeuralNetwork"]["Training"]:
             config["NeuralNetwork"]["Training"]["Optimizer"]["type"] = "AdamW"
 
-        hydragnn.utils.input_config_parsing.save_config(config, log_name="", path=modeldir)
+        #Save config in pretrained_model_ensemble directory
+        if not checkpoint_dir:
+            hydragnn.utils.input_config_parsing.save_config(config, log_name="", path=modeldir)
+        #Save config in finetuned_model_ensemble directory in fintetuning_log_dir
+        else:
+            modeldir_split = os.path.split(modeldir)[-1]
+            os.makedirs(os.path.join(checkpoint_path,modeldir_split), exist_ok=True)
+            hydragnn.utils.input_config_parsing.save_config(config, log_name="", path=os.path.join(checkpoint_path,modeldir_split))
+
+def _force_dataset_name_2d(batch):
+    if getattr(batch, "batch", None) is None:
+        num_graphs = 1
+        device = batch.x.device
+    else:
+        num_graphs = int(batch.batch.max().item()) + 1
+        device = batch.batch.device
+
+    ds = torch.zeros((num_graphs, 1), device=device, dtype=torch.long)
+    setattr(batch, "dataset_name", ds)
+    return batch
+def get_distributed_model_find_unused(model, verbosity=0):
+    import torch.distributed as dist
+    from torch.nn.parallel import DistributedDataParallel as DDP
+
+    if dist.is_available() and dist.is_initialized():
+        device = get_device()
+        model = model.to(device)
+        if device.type == "cuda":
+            return DDP(
+                model,
+                device_ids=[device.index],
+                output_device=device.index,
+                find_unused_parameters=True,
+            )
+        return DDP(model, find_unused_parameters=True)
+    return model
 
 
 def update_head_string(s: str) -> str:
@@ -224,7 +265,7 @@ def update_graph_shared_string(s: str) -> str:
 
 
 def update_GFM_2024_checkpoint(
-    model, model_name, path="./logs/", optimizer=None, use_deepspeed=False
+    model, model_name, path="./logs/", optimizer=None, use_deepspeed=False, GFM_2024=False
 ):
     """Load both model and optimizer state from a single checkpoint file, renaming head keys.
        If <model_name>.pk is missing, fall back to the highest <model_name>_epoch_*.pk.
@@ -257,19 +298,38 @@ def update_GFM_2024_checkpoint(
     state_dict = checkpoint.get("model_state_dict", checkpoint)
 
     # Build a renamed copy so we don't modify while iterating
-    renamed_state_dict = {}
-    for k, v in state_dict.items():
-        if "head" in k:
-            new_k = update_head_string(k)
-        elif "graph_shared" in k:
-            new_k = update_graph_shared_string(k)
-        else:
-            new_k = k
-        renamed_state_dict[new_k] = v
-    state_dict = renamed_state_dict  # write back the updated mapping
+    if GFM_2024:
+        renamed_state_dict = {}
+        for k, v in state_dict.items():
+            if "head" in k:
+                new_k = update_head_string(k)
+            elif "graph_shared" in k:
+                new_k = update_graph_shared_string(k)
+            else:
+                new_k = k
+            renamed_state_dict[new_k] = v
+        state_dict = renamed_state_dict  # write back the updated mapping
+        model.load_state_dict(state_dict)
 
-    # Load into model
-    model.load_state_dict(state_dict)
+    else:
+        needs_rename = any(
+            (".heads_NN." in k or ".graph_shared." in k) and ("branch-" not in k)
+            for k in state_dict.keys()
+        )
+
+        if needs_rename:
+            renamed_state_dict = {}
+            for k, v in state_dict.items():
+                if ".heads_NN." in k:
+                    new_k = update_head_string(k)
+                elif ".graph_shared." in k:
+                    new_k = update_graph_shared_string(k)
+                else:
+                    new_k = k
+                renamed_state_dict[new_k] = v
+            state_dict = renamed_state_dict
+
+        model.load_state_dict(state_dict, strict=False)
 
     # Optionally load optimizer state
     if (optimizer is not None) and ("optimizer_state_dict" in checkpoint):
@@ -283,31 +343,35 @@ class model_ensemble(torch.nn.Module):
         self.model_ens = torch.nn.ModuleList()
         for imodel, modeldir in enumerate(self.model_dir_list):
             input_filename = os.path.join(modeldir, "config.json")
-            #print("INPUT_FILENAME", input_filename, flush=True)
+            print("INPUT_FILENAME", input_filename, flush=True)
             with open(input_filename, "r") as f:
                 config = json.load(f)
             model = hydragnn.models.create_model_config(
                 config=config["NeuralNetwork"],
                 verbosity=verbosity,
             )
-            model = hydragnn.utils.distributed.get_distributed_model(model, verbosity)
+            #model = hydragnn.utils.distributed.get_distributed_model(model, verbosity)
+            model = get_distributed_model_find_unused(model, verbosity)
             # Print details of neural network architecture
             # print("Loading model %d, %s"%(imodel, modeldir))
-            if modelname is None:
-                if not GFM_2024:
-                    hydragnn.utils.model.load_existing_model(model, os.path.basename(modeldir), path=os.path.dirname(modeldir))
-                else:
-                    update_GFM_2024_checkpoint(model, os.path.basename(modeldir), path=os.path.dirname(modeldir))
-            else:
-                if not GFM_2024:
-                    hydragnn.utils.model.load_existing_model(model, modelname, path=modeldir+dir_extra)
-                else:
-                    update_GFM_2024_checkpoint(model, os.path.basename(modeldir), path=os.path.dirname(modeldir))
+            #if modelname is None:
+            #    if not GFM_2024:
+            #        hydragnn.utils.model.load_existing_model(model, os.path.basename(modeldir), path=os.path.dirname(modeldir))
+            #    else:
+            #        update_GFM_2024_checkpoint(model, os.path.basename(modeldir), path=os.path.dirname(modeldir), GFM_2024=GFM_2024)
+            #else:
+            #    if not GFM_2024:
+            #        hydragnn.utils.model.load_existing_model(model, modelname, path=modeldir+dir_extra)
+            #    else:
+            #        update_GFM_2024_checkpoint(model, os.path.basename(modeldir), path=os.path.dirname(modeldir), GFM_2024=GFM_2024)
 
             if fine_tune_config is not None: 
                 model = model.module
                 model = um.update_model(model, fine_tune_config)
-                model = hydragnn.utils.distributed.get_distributed_model(model, verbosity)
+                if GFM_2024:
+                    model = hydragnn.utils.distributed.get_distributed_model(model, verbosity)
+                else:
+                    model = get_distributed_model_find_unused(model, verbosity)
 
             self.model_ens.append(model)
 
@@ -390,6 +454,9 @@ class model_ensemble(torch.nn.Module):
 
 
 def test_ensemble(model_ens, loader, dataset_name, verbosity, num_samples=None):
+    last_underscore_index = dataset_name.rfind('_')
+    task = dataset_name[:last_underscore_index]
+
     n_ens=len(model_ens.module)
     num_heads=model_ens.module.num_heads
 
@@ -398,18 +465,21 @@ def test_ensemble(model_ens, loader, dataset_name, verbosity, num_samples=None):
 
     true_values = [[] for _ in range(num_heads)]
     predicted_values = [[[] for _ in range(num_heads)] for _ in range(n_ens)]
+
+    natoms =[]
    
     for data in iterate_tqdm(loader, verbosity):
         data=data.to(device)
+        data = _force_dataset_name_2d(data)
         head_index = get_head_indices(model_ens.module.model_ens[0], data)
-        ###########################
         pred_ens = model_ens(data)
-        ###########################
         ytrue = data.y
+
+        natoms.append(data.natoms)
+
         for ihead in range(num_heads):
             head_val = ytrue[head_index[ihead]]
             true_values[ihead].extend(head_val)
-        ###########################
         for imodel, pred in enumerate(pred_ens):
             if imodel==0:
                 num_samples_total += data.num_graphs
@@ -424,7 +494,6 @@ def test_ensemble(model_ens, loader, dataset_name, verbosity, num_samples=None):
     predicted_std= [[] for _ in range(num_heads)]
     for ihead in range(num_heads):
         head_pred = []
-       # print("For head %d"%ihead)
         for imodel in range(len(model_ens.module)):
             head_all = torch.tensor(predicted_values[imodel][ihead])
             head_all = gather_tensor_ranks(head_all)
@@ -441,24 +510,10 @@ def test_ensemble(model_ens, loader, dataset_name, verbosity, num_samples=None):
         true_values[ihead] = gather_tensor_ranks(true_values[ihead])
         predicted_mean[ihead] = head_pred_mean 
         predicted_std[ihead] = head_pred_std
-        # print(head_pred_ens.size(), true_values[ihead].size())
-    
-    #save values to pandas dataframe
-    Smiles = "blank"
-    t_values = true_values[0].tolist()
-    pred_values = predicted_mean[0].tolist()
-    outputs_df = pd.DataFrame({
-        "SMILE Strings": Smiles,
-        "True Value": t_values,
-        "Predicted Value": pred_values
-    })
-    
-    print(f"Done testing for {dataset_name}")
-
     return (
         true_values,
-        predicted_mean,
-        predicted_std
+        predicted_values,
+        natoms,
     )
 
 def get_model_directory(path_to_ensemble):
@@ -485,7 +540,7 @@ def get_model_directory(path_to_ensemble):
             var_config = config["NeuralNetwork"]["Variables_of_interest"]
     verbosity = config["Verbosity"]["level"]
 
-def train_ensemble(model_ensemble, train_loader, val_loader, num_epochs, optimizers, device="cpu", member_checkpoints=None):
+def train_ensemble(model_ensemble, train_loader, val_loader, num_epochs, optimizers, device="cpu", member_checkpoints=None, GFM_2024=False):
     """
     Train an ensemble of models using a custom loss_and_backprop function.
 
@@ -509,7 +564,10 @@ def train_ensemble(model_ensemble, train_loader, val_loader, num_epochs, optimiz
                     enumerate(train_loader), verbosity_level=2, desc="Train Ensemble", total=nbatch
             ):
             # Forward pass and backpropagation
-            total_tasks_loss = torch.atleast_1d(model_ensemble.module.loss_and_backprop(batch.to(get_device())))
+            if not GFM_2024:
+                batch = batch.to(get_device())
+                batch = _force_dataset_name_2d(batch)
+            total_tasks_loss = torch.atleast_1d(model_ensemble.module.loss_and_backprop(batch))
 
             # Optimizer step for each ensemble member
             for optimizer in optimizers:
@@ -525,6 +583,9 @@ def train_ensemble(model_ensemble, train_loader, val_loader, num_epochs, optimiz
         val_loss = 0 
         for batch in val_loader: 
             #forward pass 
+            if not GFM_2024:
+                batch = batch.to(get_device())
+                batch = _force_dataset_name_2d(batch)
             total_tasks_loss = torch.atleast_1d(model_ensemble.module.val_loss(batch.to(get_device())))
 
             #accumulate validation loss for logging 
@@ -547,6 +608,10 @@ def run_finetune(dictionary_variables, args):
     """Main training/validation/test entry point.
     Accepts an argparse.Namespace-like `args`.
     """
+    modelname = "FineTuning" if args.modelname is None else args.modelname
+    datasetname = "FineTuning" if args.datasetname is None else args.datasetname
+    gfm_2024 = args.gfm_2024
+
     # ---- tracing / timers ----
     tr.initialize()
     tr.disable()
@@ -555,6 +620,7 @@ def run_finetune(dictionary_variables, args):
 
     # ---- load fine-tuning config ----
     ftcfgfile = args.finetuning_config
+    print(ftcfgfile, flush=True)
     with open(ftcfgfile, "r") as f:
         ft_config = json.load(f)
 
@@ -568,8 +634,8 @@ def run_finetune(dictionary_variables, args):
             finetuning_log_dir = "./logs"
         os.environ["FINETUNING_LOG_DIR"] = finetuning_log_dir
     os.makedirs(finetuning_log_dir, exist_ok=True)
-    modelname = "FineTuning" if args.modelname is None else args.modelname
-    os.makedirs(os.path.join(finetuning_log_dir, modelname), exist_ok=True)
+    if args.checkpoint_dir:
+        os.makedirs(os.path.join(finetuning_log_dir, modelname), exist_ok=True)
 
     verbosity = ft_config["Verbosity"]["level"]
     var_config = ft_config["NeuralNetwork"]["Variables_of_interest"]
@@ -578,8 +644,14 @@ def run_finetune(dictionary_variables, args):
     var_config["node_feature_names"] = dictionary_variables['node_feature_names']
     var_config["node_feature_dims"] = dictionary_variables['node_feature_dims']
 
+    if not gfm_2024:
+        var_config["input_node_features"] = [0]
+
     if args.batch_size is not None:
         ft_config["NeuralNetwork"]["Training"]["batch_size"] = args.batch_size
+
+    if args.num_epochs is not None:
+        ft_config["NeuralNetwork"]["Training"]["num_epoch"] = args.num_epochs
 
     # ---- initialize DDP / MPI ----
     comm_size, rank = setup_ddp()
@@ -592,8 +664,6 @@ def run_finetune(dictionary_variables, args):
         datefmt="%H:%M:%S",
     )
 
-    datasetname = "FineTuning" if args.datasetname is None else args.datasetname
-    #modelname = "FineTuning" if args.modelname is None else args.modelname
     log_name = modelname
     hydragnn.utils.print.print_utils.setup_log(log_name)
     writer = hydragnn.utils.model.get_summary_writer(log_name, path=finetuning_log_dir)
@@ -644,13 +714,29 @@ def run_finetune(dictionary_variables, args):
         trainset, valset, testset, ft_config["NeuralNetwork"]["Training"]["batch_size"]
     )
 
+    # Prepare per-member checkpoints if enabled
+    member_checkpoints = None
+    try:
+        save_ckpt = ft_config["NeuralNetwork"]["Training"].get("Checkpoint", False)
+    except Exception:
+        save_ckpt = False
+
+    if save_ckpt:
+        if args.checkpoint_dir:
+            checkpoint_path = os.path.join(finetuning_log_dir, modelname)
+        else:
+            checkpoint_path = finetuning_log_dir
+
     # ---- ensemble setup ----
     ensemble_path = Path(args.pretrained_model_ensemble_path)
     model_dir_list = [os.path.join(ensemble_path, model_id) for model_id in os.listdir(ensemble_path)]
-    update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader)
+    update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader, args.checkpoint_dir, checkpoint_path)
 
-    model = model_ensemble(model_dir_list, fine_tune_config=ft_config, GFM_2024=True)
-    model = get_distributed_model(model, verbosity=2)
+    model = model_ensemble(model_dir_list, fine_tune_config=ft_config, GFM_2024=gfm_2024)
+    if gfm_2024:
+        model = get_distributed_model(model, verbosity=2)
+    else:
+        model = get_distributed_model_find_unused(model, verbosity=2)
 
     print("Created Dataloaders")
     comm.Barrier()
@@ -665,12 +751,7 @@ def run_finetune(dictionary_variables, args):
         for member in model.module.model_ens
     ]
 
-    # Prepare per-member checkpoints if enabled
-    member_checkpoints = None
-    try:
-        save_ckpt = ft_config["NeuralNetwork"]["Training"].get("Checkpoint", False)
-    except Exception:
-        save_ckpt = False
+
     if save_ckpt:
         warmup = ft_config["NeuralNetwork"]["Training"].get("checkpoint_warmup", 0)
         member_checkpoints = []
@@ -678,15 +759,26 @@ def run_finetune(dictionary_variables, args):
             # Use the original pretrained model directory name
             member_name = os.path.basename(model_dir_list[idx])
             # ensure log directory exists for this member under configured logs root
-            os.makedirs(os.path.join(finetuning_log_dir, modelname, member_name), exist_ok=True)
-            member_checkpoints.append(
-                Checkpoint(
-                    name=member_name,
-                    warmup=warmup,
-                    path=os.path.join(finetuning_log_dir, modelname),
-                    use_deepspeed=False,
+            if args.checkpoint_dir:
+                os.makedirs(os.path.join(finetuning_log_dir, modelname, member_name), exist_ok=True)
+                member_checkpoints.append(
+                    Checkpoint(
+                        name=member_name,
+                        warmup=warmup,
+                        path=os.path.join(finetuning_log_dir, modelname),
+                        use_deepspeed=False,
+                    )
                 )
-            )
+            else:
+                os.makedirs(os.path.join(finetuning_log_dir, member_name), exist_ok=True)
+                member_checkpoints.append(
+                    Checkpoint(
+                        name=member_name,
+                        warmup=warmup,
+                        path=finetuning_log_dir,
+                        use_deepspeed=False,
+                    )
+                )
 
     train_ensemble(
         model,
@@ -696,10 +788,45 @@ def run_finetune(dictionary_variables, args):
         optimizers=optimizers,
         device="cuda",
         member_checkpoints=member_checkpoints,
+        GFM_2024=gfm_2024,
     )
 
     # Test the ensemble
-    test_ensemble(model, test_loader, modelname, verbosity=2)
+    true_, pred, natoms = test_ensemble(model, test_loader, modelname, verbosity=2)
+
+    last_underscore_index = datasetname.rfind('_')
+    task = datasetname[:last_underscore_index]
+
+
+    for i in range(len(natoms)):
+        if i == 0:
+            natoms_ = natoms[i]
+        else:
+            natoms_ = torch.cat((natoms_, natoms[i]),dim=0)
+
+    pred_ = []
+    for i in range(len(pred[0][0])):
+        pred_.append(pred[0][0][i])
+    pred_ = torch.tensor(pred_).squeeze()
+
+    if task in ["matbench_jdft2d"]:
+
+        print("PRED", pred_.to('cpu')*1000/natoms_.to('cpu'))
+        print("TRUE", true_[0].to('cpu')*1000/natoms_.to('cpu'))
+        absdiff = torch.absolute(true_[0].to('cpu')-pred_.to('cpu'))
+        absdiff_scaled = torch.absolute(true_[0].to('cpu')*1000/natoms_.to('cpu')-pred_.to('cpu')*1000/natoms_.to('cpu'))
+        print("absdiff_scaled", absdiff_scaled)
+        print("MAE_scaled", torch.mean(absdiff_scaled))
+
+        print("RMSE", torch.sqrt(torch.mean((true_[0].to('cpu')*1000/natoms_.to('cpu')-pred_.to('cpu')*1000/natoms_.to('cpu'))**2)))
+        print("Max", torch.max(absdiff_scaled))
+
+    elif task in ["matbench_mp_is_metal"]:
+        print("CORRECT_COUNT: ", torch.eq(true_[0].to('cpu'), (torch.sigmoid(pred_.to('cpu'))> 0.5)).sum().item())
+        print("Percentage Correct: ", torch.eq(true_[0].to('cpu'), (torch.sigmoid(pred_.to('cpu'))> 0.5)).sum().item() / true_[0].to('cpu').shape[0])
+        print("ROCAUC: ", roc_auc_score(true_[0].detach().cpu().numpy(), pred_.detach().cpu().numpy()))
+        print("F1: ", f1_score(true_[0].detach().cpu().numpy(), (torch.sigmoid(pred_)>0.5).detach().cpu().numpy()))
+        print("Balanced_acc: ", balanced_accuracy_score(true_[0].detach().cpu().numpy(), (torch.sigmoid(pred_)>0.5).detach().cpu().numpy()))
 
     # Optional: return something useful (e.g., final metrics)
     return True
@@ -728,6 +855,10 @@ def build_arg_parser():
     parser.add_argument("--datasetname", help="dataset name")
     parser.add_argument("--modelname", help="model name")
     parser.add_argument("--batch_size", type=int, help="batch_size", default=None)
+    parser.add_argument("--num_epochs", type=int, help="num_epoch", default=None)
+    parser.add_argument("--checkpoint_dir", action='store_true', help="Whether to store checkpoint within a folder based on modelname, useful for case where multiple models are finetuned, e.g. matbench")
+    parser.add_argument("--gfm_2024", action='store_true', help="Whether to use 2024 gfm model or not")
+    parser.add_argument("--freeze", action='store_true', help="freeze layers or not")
 
     group = parser.add_mutually_exclusive_group()
     group.add_argument(

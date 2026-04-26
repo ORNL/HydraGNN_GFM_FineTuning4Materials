@@ -5,7 +5,7 @@
     "NeuralNetwork": {
         "Profile": {"enable": 1},
         "Architecture": {
-            "freeze_conv_layers": false,
+            "freeze_conv_layers": true,
             "output_heads": {
                 "graph": [
                     {

@@ -43,9 +43,9 @@
             "Checkpoint" : true,
             "num_epoch": 10,
             "perc_train": 0.7,
-            "loss_function_types": ["mae"],
+            "loss_function_types": ["binary"],
             "batch_size": 32,
-            "continue": 1,
+            "continue": 0,
             "startfrom": "existing_model",
             "Optimizer": {
                 "type": "AdamW",

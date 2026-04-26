@@ -11,8 +11,21 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # The paths below assume that you are running this script from the root directory.
-    args.pretrained_model_ensemble_path = './pretrained_model_ensemble'
-    args.finetuning_config = './examples/matbench/finetuning_config.json'
+    #args.pretrained_model_ensemble_path = './pretrained_model_ensemble'
+    #args.pretrained_model_ensemble_path = './pretrained_model_ensemble_2026'
+    args.pretrained_model_ensemble_path = './gb_model_ensemble'
+    last_underscore_index = args.datasetname.rfind('_')
+    task = args.datasetname[:last_underscore_index]
+    if task in ["matbench_mp_is_metal"]:
+        if args.freeze:
+            args.finetuning_config = './examples/matbench/finetuning_config_bce_freeze.json'
+        else:
+            args.finetuning_config = './examples/matbench/finetuning_config_bce.json'
+    else:
+        if args.freeze:
+            args.finetuning_config = './examples/matbench/finetuning_config_freeze.json'
+        else:
+            args.finetuning_config = './examples/matbench/finetuning_config.json'
 
     # ---- feature schema (explicit override) ----
     graph_feature_names = ["energy"]

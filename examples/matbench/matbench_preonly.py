@@ -103,10 +103,19 @@ class MatbenchDataset(AbstractBaseDataset):
 
     def pmg_to_graph(self, molecule, pred):
 
-        atomic_numbers = torch.tensor(molecule.atomic_numbers).unsqueeze(1).to(torch.float32)
-        pos = torch.tensor(molecule.cart_coords).to(torch.float32)
+        atomic_numbers = torch.tensor(molecule.atomic_numbers).unsqueeze(1).to(torch.float64)
+        pos = torch.tensor(molecule.cart_coords).to(torch.float64)
         natoms = torch.IntTensor([pos.shape[0]])
-        pred = torch.tensor(pred, dtype=torch.float32).unsqueeze(0)
+        if self.task in ["matbench_mp_is_metal"]:
+            pred = torch.tensor(pred, dtype=torch.bool).unsqueeze(0)
+        else:
+            if self.task in ["matbench_jdft2d"]:
+                pred = pred / 1000 * pos.shape[0] # convert to mev/atom to ev
+            pred = torch.tensor(pred, dtype=torch.float64).unsqueeze(0)
+
+        charge = 0.0  # neutral
+        spin = 1.0  # singlet
+        graph_attr = torch.tensor([charge, spin], dtype=torch.float64)
 
         try:
             x = torch.cat((atomic_numbers, pos), dim=1)
@@ -118,6 +127,7 @@ class MatbenchDataset(AbstractBaseDataset):
                 atomic_numbers=atomic_numbers,  # Reshaping atomic_numbers to Nx1 tensor
                 x=x,
                 pred=pred,
+                graph_attr=graph_attr,
             )
 
             data_object.y = data_object.pred
