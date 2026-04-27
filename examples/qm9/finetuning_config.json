@@ -1,60 +1,104 @@
 {
-    "Verbosity": {
-        "level": 2
-    },
-    "NeuralNetwork": {
-        "Profile": {"enable": 1},
-        "Architecture": {
-            "output_heads": {
-                "graph": [
-                    {
-                        "type": "branch-0",
-                        "architecture": {
-                            "dim_pretrained": 50,
-                            "num_sharedlayers": 2,
-                            "dim_sharedlayers": 5,
-                            "num_headlayers": 2,
-                            "dim_headlayers": [
-                                50,
-                                25
-                            ]
-                        }
-                    }
-                ]
-            },
-            "task_weights": [1.0],
-            "output_dim": [
-                1
-            ],
-            "output_type": [
-                "graph"
-            ]
-        },
-        "Variables_of_interest": {
-            "input_node_features": [0, 1, 2, 3],
-            "output_names": ["free_energy"],
-            "output_index": [0],
-            "output_dim": [1],
-            "type": ["graph"],
-            "denormalize_output": false
-        },
-        "Training": {
-            "Checkpoint" : true,
-            "num_epoch": 100,
-            "perc_train": 0.7,
-            "loss_function_types": ["mae"],
-            "batch_size": 32,
-            "continue": 0,
-            "startfrom": "existing_model",
-            "Optimizer": {
-                "type": "AdamW",
-                "learning_rate": 1e-3
+  "Verbosity": { "level": 2 },
+  "NeuralNetwork": {
+    "Architecture": {
+      "mpnn_type": "PAINN",
+      "enable_interatomic_potential": true,
+      "equivariance": true,
+      "radius": 5,
+      "max_neighbours": 20,
+      "num_gaussians": 50,
+      "radial_type": "bessel",
+      "envelope_exponent": 5,
+      "int_emb_size": 64,
+      "basis_emb_size": 8,
+      "out_emb_size": 128,
+      "num_after_skip": 2,
+      "num_before_skip": 1,
+      "num_radial": 4,
+      "num_spherical": 7,
+      "num_filters": 126,
+      "max_ell": 1,
+      "node_max_ell": 1,
+      "pe_dim": 1,
+      "global_attn_heads": 8,
+      "global_attn_engine": "",
+      "global_attn_type": "",
+      "graph_pooling": "add",
+      "hidden_dim": 337,
+      "num_conv_layers": 2,
+      "use_graph_attr_conditioning": true,
+      "graph_attr_conditioning_mode": "concat_node",
+      "periodic_boundary_conditions": false,
+      "output_heads": {
+        "graph": [
+          {
+            "type": "branch-0",
+            "architecture": {
+              "dim_pretrained": 50,
+              "num_sharedlayers": 2,
+              "dim_sharedlayers": 50,
+              "num_headlayers": 2,
+              "dim_headlayers": [50, 25]
             }
-        }
+          }
+        ]
+      },
+      "task_weights": [1.0],
+      "energy_weight": 0.0,
+      "energy_peratom_weight": 1.0,
+      "force_weight": 0.0,
+      "input_dim": 1,
+      "pna_deg": null,
+      "avg_num_neighbors": null,
+      "edge_dim": null,
+      "initial_bias": null,
+      "activation_function": "relu",
+      "SyncBatchNorm": false,
+      "output_dim": [1],
+      "output_type": ["graph"],
+      "num_nodes": 4,
+      "distance_transform": null,
+      "correlation": null
     },
-    "Visualization": {
-        "plot_init_solution": true,
-        "plot_hist_solution": false,
-        "create_plots": true
+    "Variables_of_interest": {
+      "input_node_features": [0],
+      "output_index": [0],
+      "type": ["graph"],
+      "output_dim": [1],
+      "output_names": ["graph_energy"],
+      "denormalize_output": false,
+      "graph_feature_names": ["energy"],
+      "graph_feature_dims": [1],
+      "node_feature_names": ["atomic_number", "cartesian_coordinates"],
+      "node_feature_dims": [1, 3]
+    },
+    "Training": {
+      "Checkpoint": true,
+      "num_epoch": 100,
+      "EarlyStopping": true,
+      "perc_train": 0.7,
+      "loss_function_types": ["mae"],
+      "batch_size": 32,
+      "continue": 0,
+      "startfrom": "",
+      "checkpoint_warmup": 0,
+      "precision": "fp64",
+      "energy_target_mode": "total",
+      "train_from_scratch": false,
+      "keep_pretrained_decoder": false,
+      "freeze_mode": "None",
+      "compute_grad_energy": false,
+      "conv_checkpointing": false,
+      "Optimizer": {
+        "type": "AdamW",
+        "learning_rate": 1e-3
+      }
     }
+  },
+  "Visualization": {
+    "plot_init_solution": true,
+    "plot_hist_solution": false,
+    "create_plots": true
+  }
 }
