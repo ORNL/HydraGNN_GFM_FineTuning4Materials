@@ -2,88 +2,195 @@ import torch
 import torch.nn as nn
 
 
-def create_mlps(config):
+def _build_mlp_layers(input_dim, hidden_dims, output_dim, activation_function):
+    """Build a simple MLP with the model's activation between linear layers."""
+    layers = []
+    current_dim = input_dim
+
+    for hidden_dim in hidden_dims:
+        layers.append(nn.Linear(current_dim, hidden_dim))
+        layers.append(activation_function)
+        current_dim = hidden_dim
+
+    layers.append(nn.Linear(current_dim, output_dim))
+    return nn.Sequential(*layers)
+
+
+def _resolve_decoder_target(model):
+    """Return the module whose forward path owns graph_shared and heads_NN."""
+    wrapped_model = getattr(model, "model", None)
+    if wrapped_model is not None and hasattr(wrapped_model, "graph_shared"):
+        return wrapped_model
+    return model
+
+
+def _drop_wrapper_decoder_modules(model, decoder_target):
+    """Remove stale wrapper decoder modules so parameter listings stay accurate."""
+    if decoder_target is model:
+        return
+
+    for module_name in ("graph_shared", "heads_NN"):
+        if module_name in model._modules:
+            del model._modules[module_name]
+
+
+def _freeze_module(module):
+    """Disable gradients for every parameter owned by a module."""
+    if module is None:
+        return
+    for parameter in module.parameters():
+        parameter.requires_grad = False
+
+
+def _normalize_freeze_mode(raw_mode):
+    """Map user-facing freeze labels to canonical internal names."""
+    normalized = str(raw_mode).strip().lower()
+    aliases = {
+        "none": "none",
+        "shared + head": "shared_head",
+        "shared+head": "shared_head",
+        "shared_head": "shared_head",
+        "message passing": "message_passing",
+        "message_passing": "message_passing",
+    }
+    if normalized not in aliases:
+        raise ValueError(
+            "Unsupported freeze_mode. Use one of: 'None', 'shared + head', 'message passing'."
+        )
+    return aliases[normalized]
+
+
+def _keep_pretrained_branch_zero(decoder_target):
+    """Keep the loaded decoder weights and prune to the active branch-0 path."""
+    if "branch-0" not in decoder_target.graph_shared:
+        raise ValueError("Expected pretrained graph_shared to contain branch-0")
+
+    graph_shared = nn.ModuleDict({"branch-0": decoder_target.graph_shared["branch-0"]})
+    heads_nn = nn.ModuleList()
+    for head_module in decoder_target.heads_NN:
+        if "branch-0" not in head_module:
+            raise ValueError("Expected pretrained heads_NN to contain branch-0")
+        heads_nn.append(nn.ModuleDict({"branch-0": head_module["branch-0"]}))
+
+    decoder_target.graph_shared = graph_shared
+    decoder_target.heads_NN = heads_nn
+    decoder_target.num_branches = 1
+
+    if isinstance(decoder_target.config_heads, dict) and "graph" in decoder_target.config_heads:
+        decoder_target.config_heads["graph"] = [
+            branch_spec
+            for branch_spec in decoder_target.config_heads["graph"]
+            if branch_spec.get("type") == "branch-0"
+        ]
+
+
+def apply_freeze_mode(model, ft_config):
+    """Freeze selected model regions for fine-tuning experiments."""
+    decoder_target = _resolve_decoder_target(model)
+    freeze_mode = _normalize_freeze_mode(
+        ft_config["NeuralNetwork"]["Training"].get("freeze_mode", "none")
+    )
+
+    if freeze_mode == "none":
+        return model
+
+    if freeze_mode == "shared_head":
+        _freeze_module(decoder_target.graph_shared)
+        _freeze_module(decoder_target.heads_NN)
+        return model
+
+    if freeze_mode == "message_passing":
+        for module_name in (
+            "graph_convs",
+            "feature_layers",
+            "graph_conditioner",
+            "graph_concat_projector",
+            "graph_pool_projector",
+            "pos_emb",
+            "node_emb",
+            "node_lin",
+            "rel_pos_emb",
+            "edge_emb",
+            "edge_lin",
+        ):
+            _freeze_module(getattr(decoder_target, module_name, None))
+        return model
+
+    return model
+
+
+def create_graph_shared_layers(config, hidden_dim, activation_function):
     """
-    Creates head MLPs that take input from a pretrained shared layer.
+    Create the shared graph-level decoder layers used before branch-specific heads.
 
     Args:
-        config (dict): A dictionary with the following keys:
-            - dim_pretrained (int): Dimension of the pretrained shared layer output.
-            - dim_headlayers (list of int): List containing the dimensions for layers within each head.
-            - output_dim (list of int): List containing the output dimensions for each head.
+        config: Fine-tuning architecture configuration.
+        hidden_dim: Backbone graph embedding size.
+        activation_function: Activation module used by the base model.
 
     Returns:
-        list of nn.Sequential: A list of head MLP modules.
+        nn.ModuleDict: Shared graph decoder branches.
     """
+    graph_shared = nn.ModuleDict({})
 
+    for branch_spec in config["output_heads"].get("graph", []):
+        branch_name = branch_spec["type"]
+        branch_arch = branch_spec["architecture"]
+        num_sharedlayers = branch_arch["num_sharedlayers"]
+        dim_sharedlayers = branch_arch["dim_sharedlayers"]
+
+        if num_sharedlayers < 1:
+            raise ValueError("num_sharedlayers must be at least 1 for graph heads")
+
+        shared_hidden_dims = [dim_sharedlayers] * num_sharedlayers
+        graph_shared[branch_name] = _build_mlp_layers(
+            hidden_dim,
+            shared_hidden_dims[:-1],
+            shared_hidden_dims[-1],
+            activation_function,
+        )
+
+    return graph_shared
+
+
+def create_mlps(config, activation_function):
+    """
+    Create branch-specific graph heads that consume the shared graph embedding.
+
+    Args:
+        config: Fine-tuning architecture configuration.
+        activation_function: Activation module used by the base model.
+
+    Returns:
+        nn.ModuleList: One ModuleDict per output head.
+    """
     output_dims = config["output_dim"]
-
-    # Create head MLPs
     head_mlps = []
 
-    for output_head_type, output_head_specs in config["output_heads"].items():
+    for head_index, output_dim in enumerate(output_dims):
+        head_mlp = nn.ModuleDict({})
+        output_head_type = config["output_type"][head_index]
+        output_head_specs = config["output_heads"].get(output_head_type, [])
 
-        # Validate output_head_specs is a non-empty list
-        if not isinstance(output_head_specs, list) or not output_head_specs:
-            raise ValueError(f"Invalid input: output_head_specs for '{output_head_type}' must be a non-empty list")
-        head_spec = output_head_specs[0]
-        # Validate 'architecture' key exists and is a dict
-        if 'architecture' not in head_spec or not isinstance(head_spec['architecture'], dict):
-            raise ValueError(f"Invalid input: 'architecture' key missing or not a dict in output_head_specs[0] for '{output_head_type}'")
-        arch = head_spec['architecture']
+        if not output_head_specs:
+            raise ValueError(f"Missing output head specs for '{output_head_type}'")
 
-        if (
-            output_head_type == 'node'
-            and 'conv_layers' in arch
-            and arch['conv_layers']
-        ):
-            raise ValueError("Invalid input: Fine tuning for node-level prediction heads with convolutional layers not supported yet")
+        for branch_spec in output_head_specs:
+            branch_name = branch_spec["type"]
+            branch_arch = branch_spec["architecture"]
+            dim_sharedlayers = branch_arch["dim_sharedlayers"]
+            dim_headlayers = branch_arch["dim_headlayers"]
 
-        # Validate required keys in architecture
-        if 'dim_pretrained' not in arch or 'dim_headlayers' not in arch:
-            raise ValueError(f"Invalid input: 'dim_pretrained' or 'dim_headlayers' missing in architecture for '{output_head_type}'")
-        dim_pretrained = arch["dim_pretrained"]
-        dim_headlayers = arch["dim_headlayers"]
+            head_mlp[branch_name] = _build_mlp_layers(
+                dim_sharedlayers,
+                dim_headlayers,
+                output_dim,
+                activation_function,
+            )
 
-        for head_index in range(len(output_dims)):
-            head_layers = []
-            in_dim = dim_pretrained  # Use pretrained layer dimension as input
-
-            # Create hidden layers based on dim_headlayers
-            for head_dim in dim_headlayers:
-                head_layers.append(nn.Linear(in_dim, head_dim))
-                head_layers.append(nn.ReLU())
-                in_dim = head_dim
-
-            # Output layer for each head with specified output dimension
-            head_layers.append(nn.Linear(in_dim, output_dims[head_index]))
-
-            # Create the head MLP as a Sequential model
-            head_mlp = nn.ModuleDict({})
-            head_mlp['branch-0'] = nn.Sequential(*head_layers)
-            head_mlps.append(head_mlp)
+        head_mlps.append(head_mlp)
 
     return nn.ModuleList(head_mlps)
-
-
-def update_ensemble(model, ft_config):
-    """
-    Updates the given model ensemble according to the specified fine-tuning configuration.
-    only meant to work on non-ddp models.
-    Args:
-        model (nn.Module): The model ensemble to be updated for fine-tuning. Must have `model_ens` attribute
-        ft_config (dict): A configuration dictionary containing fine-tuning parameters
-                          and architectural modifications.
-
-    Returns:
-        nn.Module: The updated ensemble model configured for fine-tuning.
-    """
-    updated_ens = [update_model(model_k) for model_k in model.model_ens]
-    model.model_ens = updated_ens 
-    model.num_heads = self.model_ens[0].module.num_heads
-    model.loss = self.model_ens[0].module.loss
-    model.model_size = len(self.model_dir_list)
-    return model
 
 def update_loss(model, ft_config):
     """
@@ -102,7 +209,7 @@ def update_loss(model, ft_config):
     return model
 
 def generic_loss(pred, value, head_index, losses, weights):
-    tot_loss = 0
+    tot_loss = None
     tasks_loss = []
     for ihead,loss in enumerate(losses):
         head_pre = pred[ihead]
@@ -113,7 +220,8 @@ def generic_loss(pred, value, head_index, losses, weights):
         if pred_shape != value_shape:
             head_val = torch.reshape(head_val, pred_shape)
         loss_i = loss(head_pre, head_val)
-        tot_loss += (loss_i * weights[ihead]).float() 
+        weighted_loss = loss_i * weights[ihead].to(device=loss_i.device, dtype=loss_i.dtype)
+        tot_loss = weighted_loss if tot_loss is None else tot_loss + weighted_loss
         tasks_loss.append(tot_loss)
     return tot_loss, tasks_loss
         
@@ -143,20 +251,39 @@ def update_architecture(model, ft_config):
     Returns:
         nn.Module: The updated model configured for fine-tuning.
     """
-    device = next(model.parameters()).device
-    head_mlps = create_mlps(ft_config["NeuralNetwork"]["Architecture"])
-    state_dict = model.state_dict()
-    filtered_state_dict = {k: v for k, v in state_dict.items() if not k.startswith('heads_NN')}
-    model.load_state_dict(filtered_state_dict, strict=False)
-    model.heads_NN = head_mlps.to(device)
+    decoder_target = _resolve_decoder_target(model)
+    architecture_config = ft_config["NeuralNetwork"]["Architecture"]
+    keep_pretrained_decoder = ft_config["NeuralNetwork"]["Training"].get(
+        "keep_pretrained_decoder", False
+    )
 
-    model.head_type = []
-    for output_head_type, output_head_specs in ft_config["NeuralNetwork"]["Architecture"]["output_heads"].items():
-        model.head_type.append(output_head_type)
+    if keep_pretrained_decoder:
+        _keep_pretrained_branch_zero(decoder_target)
+        _drop_wrapper_decoder_modules(model, decoder_target)
+        print(decoder_target.graph_shared)
+        print(decoder_target.heads_NN)
+        return model
 
-    model.head_dims = ft_config["NeuralNetwork"]["Architecture"]["output_dim"]
-    model.num_heads = len(head_mlps)
-    print(model.heads_NN)
+    device = next(decoder_target.parameters()).device
+
+    decoder_target.graph_shared = create_graph_shared_layers(
+        architecture_config,
+        decoder_target.hidden_dim,
+        decoder_target.activation_function,
+    ).to(device)
+    decoder_target.heads_NN = create_mlps(
+        architecture_config,
+        decoder_target.activation_function,
+    ).to(device)
+    decoder_target.config_heads = architecture_config["output_heads"]
+    decoder_target.head_type = architecture_config["output_type"]
+    decoder_target.head_dims = architecture_config["output_dim"]
+    decoder_target.num_heads = len(decoder_target.heads_NN)
+    decoder_target.num_branches = len(architecture_config["output_heads"].get("graph", []))
+
+    _drop_wrapper_decoder_modules(model, decoder_target)
+    print(decoder_target.graph_shared)
+    print(decoder_target.heads_NN)
 
     return model
 
@@ -172,6 +299,7 @@ def update_model(model, ft_config):
     Returns:
         nn.Module: The updated model configured for fine-tuning.
     """
-    model = update_architecture(model, ft_config)        
+    model = update_architecture(model, ft_config)
+    model = apply_freeze_mode(model, ft_config)
     model = update_loss(model, ft_config)
     return model
