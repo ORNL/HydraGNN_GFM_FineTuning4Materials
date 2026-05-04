@@ -110,7 +110,7 @@ class MatbenchDataset(AbstractBaseDataset):
             pred = torch.tensor(pred, dtype=torch.bool).unsqueeze(0)
         else:
             if self.task in ["matbench_jdft2d"]:
-                pred = pred / 1000 * pos.shape[0] # convert to mev/atom to ev
+                pred = pred / 1000 # convert to mev/atom to ev/atom
             pred = torch.tensor(pred, dtype=torch.float64).unsqueeze(0)
 
         charge = 0.0  # neutral
