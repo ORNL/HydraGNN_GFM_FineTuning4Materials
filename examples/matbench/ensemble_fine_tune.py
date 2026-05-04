@@ -17,15 +17,9 @@ if __name__ == "__main__":
     last_underscore_index = args.datasetname.rfind('_')
     task = args.datasetname[:last_underscore_index]
     if task in ["matbench_mp_is_metal"]:
-        if args.freeze:
-            args.finetuning_config = './examples/matbench/finetuning_config_bce_freeze.json'
-        else:
-            args.finetuning_config = './examples/matbench/finetuning_config_bce.json'
+        args.finetuning_config = './examples/matbench/finetuning_config_bce.json'
     else:
-        if args.freeze:
-            args.finetuning_config = './examples/matbench/finetuning_config_freeze.json'
-        else:
-            args.finetuning_config = './examples/matbench/finetuning_config.json'
+        args.finetuning_config = './examples/matbench/finetuning_config.json'
 
     # ---- feature schema (explicit override) ----
     graph_feature_names = ["energy"]
