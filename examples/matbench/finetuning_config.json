@@ -46,7 +46,7 @@
             "loss_function_types": ["mae"],
             "batch_size": 32,
             "precision": "fp64",
-            "energy_target_mode": "per_atom",
+            "energy_target_mode": "total",
             "continue": 1,
             "startfrom": "existing_model",
             "Optimizer": {
