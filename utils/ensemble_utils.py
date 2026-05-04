@@ -112,7 +112,7 @@ def _get_training_targets(data, training_config: dict) -> torch.Tensor:
     target_dtype = _get_param_dtype(training_config)
     y = data.y.to(dtype=target_dtype)
 
-    if target_mode == "per_atom":
+    if target_mode == "per_atom" or target_mode == "bool":
         return y
 
     if target_mode == "total":

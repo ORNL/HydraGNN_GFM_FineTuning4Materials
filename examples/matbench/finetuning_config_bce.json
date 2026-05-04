@@ -45,6 +45,8 @@
             "perc_train": 0.7,
             "loss_function_types": ["binary"],
             "batch_size": 32,
+            "precision": "fp64",
+            "energy_target_mode": "bool",
             "continue": 0,
             "startfrom": "existing_model",
             "Optimizer": {
