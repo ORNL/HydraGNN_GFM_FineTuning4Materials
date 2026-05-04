@@ -5,17 +5,21 @@
     "NeuralNetwork": {
         "Profile": {"enable": 1},
         "Architecture": {
-            "freeze_conv_layers": true,
+            "freeze_conv_layers": false,
+            "enable_interatomic_potential": true,
+            "energy_weight": 1.0,
+            "energy_peratom_weight": 0.0,
+            "force_weight": 100.0,
             "output_heads": {
                 "graph": [
                     {
                         "type": "branch-0",
                         "architecture": {
-                            "dim_pretrained": 128,
+                            "dim_pretrained": 50,
                             "num_sharedlayers": 2,
-                            "dim_sharedlayers": 5,
+                            "dim_sharedlayers": 50,
                             "num_headlayers": 2,
-                            "dim_headlayers": [128, 64]
+                            "dim_headlayers": [776, 776]
                         }
                     }
                 ]
@@ -26,17 +30,22 @@
         },
         "Variables_of_interest": {
             "input_node_features": [0],
-            "output_names": ["free_energy"],
+            "output_names": ["graph_energy"],
             "output_index": [0],
             "output_dim": [1],
             "type": ["graph"],
-            "denormalize_output": false
+            "denormalize_output": false,
+            "graph_feature_names": ["energy"],
+            "graph_feature_dims": [1],
+            "node_feature_names": ["atomic_number"],
+            "node_feature_dims": [1]
         },
         "Training": {
-            "Checkpoint" : true,
+            "Checkpoint": true,
             "num_epoch": 500,
             "perc_train": 0.7,
-            "loss_function_types": ["mae"],
+            "loss_function_type": "mse",
+            "loss_function_types": ["mse"],
             "batch_size": 32,
             "continue": 0,
             "startfrom": "existing_model",

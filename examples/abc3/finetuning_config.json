@@ -5,45 +5,54 @@
     "NeuralNetwork": {
         "Profile": {"enable": 1},
         "Architecture": {
-            "freeze_conv_layers": true,
             "output_heads": {
                 "graph": [
                     {
                         "type": "branch-0",
                         "architecture": {
-                            "dim_pretrained": 128,
+                            "dim_pretrained": 50,
                             "num_sharedlayers": 2,
-                            "dim_sharedlayers": 5,
-                            "num_headlayers": 2,
-                            "dim_headlayers": [128, 64]
+                            "dim_sharedlayers": 50,
+                            "num_headlayers": 1,
+                            "dim_headlayers": [
+                                25
+                            ]
                         }
                     }
                 ]
             },
             "task_weights": [1.0],
-            "output_dim": [1],
-            "output_type": ["graph"]
+            "output_dim": [
+                1
+            ],
+            "output_type": [
+                "graph"
+            ]
         },
         "Variables_of_interest": {
-            "input_node_features": [0],
-            "output_names": ["free_energy"],
+            "input_node_features": [0, 1, 2, 3],
+            "output_names": ["energy"],
             "output_index": [0],
             "output_dim": [1],
             "type": ["graph"],
             "denormalize_output": false
         },
         "Training": {
-            "Checkpoint" : true,
-            "num_epoch": 500,
+            "Checkpoint" : false,
+            "num_epoch": 100,
             "perc_train": 0.7,
+            "precision": "fp64",
+            "energy_target_mode": "total",
             "loss_function_types": ["mae"],
             "batch_size": 32,
+            "train_from_scratch": false,
+            "keep_pretrained_decoder": false,
+            "freeze_mode": "None",
             "continue": 0,
             "startfrom": "existing_model",
             "Optimizer": {
                 "type": "AdamW",
-                "learning_rate": 1e-4,
-                "weight_decay": 1e-4
+                "learning_rate": 1.0e-4
             }
         }
     },
