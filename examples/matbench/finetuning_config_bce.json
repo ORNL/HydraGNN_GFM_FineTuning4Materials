@@ -46,7 +46,7 @@
             "loss_function_types": ["binary"],
             "batch_size": 32,
             "precision": "fp64",
-            "energy_target_mode": "bool",
+            "energy_target_mode": "not_energy",
             "continue": 0,
             "startfrom": "existing_model",
             "Optimizer": {
