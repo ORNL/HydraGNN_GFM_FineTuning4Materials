@@ -62,6 +62,7 @@ except ImportError:
 
 import torch
 import glob, re
+from sklearn.metrics import roc_auc_score, balanced_accuracy_score, f1_score
 
 
 def _get_param_dtype(training_config: dict) -> torch.dtype:
@@ -111,7 +112,7 @@ def _get_training_targets(data, training_config: dict) -> torch.Tensor:
     target_dtype = _get_param_dtype(training_config)
     y = data.y.to(dtype=target_dtype)
 
-    if target_mode == "per_atom":
+    if target_mode == "per_atom" or target_mode == "not_energy":
         return y
 
     if target_mode == "total":
@@ -155,6 +156,19 @@ def build_arg_parser():
     parser.add_argument("--datasetname", help="dataset name")
     parser.add_argument("--modelname", help="model name")
     parser.add_argument("--batch_size", type=int, help="batch_size", default=None)
+    parser.add_argument("--num_epochs", type=int, help="num_epoch override", default=None)
+    parser.add_argument(
+        "--checkpoint_dir",
+        action="store_true",
+        help="store checkpoints in a subdirectory named after modelname "
+             "(useful for multi-task matbench runs)",
+    )
+    parser.add_argument(
+        "--gfm_2024",
+        action="store_true",
+        help="use 2024 GFM model checkpoint format",
+    )
+    parser.add_argument("--freeze", action="store_true", help="freeze conv layers")
     parser.add_argument(
         "--train_from_scratch",
         action="store_true",
@@ -179,7 +193,15 @@ def build_arg_parser():
     parser.set_defaults(format="pickle")
     return parser
 
-def update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader):
+def update_config_ensemble(
+    model_dir_list,
+    train_loader,
+    val_loader,
+    test_loader,
+    checkpoint_dir=False,
+    checkpoint_path=None,
+    GFM_2024=False,
+):
     for imodel, modeldir in enumerate(model_dir_list):
         input_filename = os.path.join(modeldir, "config.json")
         with open(input_filename, "r") as f:
@@ -313,7 +335,15 @@ def update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader
         if "Optimizer" not in config["NeuralNetwork"]["Training"]:
             config["NeuralNetwork"]["Training"]["Optimizer"]["type"] = "AdamW"
 
-        hydragnn.utils.input_config_parsing.save_config(config, log_name="", path=modeldir)
+        # Save config: if checkpoint_dir is set, save to the checkpoint path as well
+        if not checkpoint_dir or checkpoint_path is None:
+            hydragnn.utils.input_config_parsing.save_config(config, log_name="", path=modeldir)
+        else:
+            modeldir_split = os.path.split(modeldir)[-1]
+            os.makedirs(os.path.join(checkpoint_path, modeldir_split), exist_ok=True)
+            hydragnn.utils.input_config_parsing.save_config(
+                config, log_name="", path=os.path.join(checkpoint_path, modeldir_split)
+            )
 
 def _force_dataset_name_2d(batch):
     if getattr(batch, "batch", None) is None:
@@ -661,6 +691,7 @@ def test_ensemble(model_ens, loader, dataset_name, verbosity, save_results:bool=
 
     true_values = [[] for _ in range(num_heads)]
     predicted_values = [[[] for _ in range(num_heads)] for _ in range(n_ens)]
+    natoms = []
     # Set to eval mode
     model_ens.eval()
 
@@ -676,6 +707,10 @@ def test_ensemble(model_ens, loader, dataset_name, verbosity, save_results:bool=
                 pred_ens = model_ens(data)
             ###########################
             ytrue = _get_training_targets(data, model_ens.module.training_config)
+
+            if hasattr(data, "natoms"):
+                natoms.append(data.natoms)
+
             for ihead in range(num_heads):
                 head_val = ytrue[head_index[ihead]]
                 true_values[ihead].extend(head_val)
@@ -732,11 +767,7 @@ def test_ensemble(model_ens, loader, dataset_name, verbosity, save_results:bool=
 
     print(f"Done testing for {dataset_name}")
 
-    return (
-        true_values,
-        predicted_mean,
-        predicted_std
-    )
+    return true_values, predicted_mean, predicted_std, natoms
 
 def get_model_directory(path_to_ensemble):
     modeldirlists = path_to_ensemble.split(",")
@@ -920,23 +951,55 @@ def make_dataloaders(trainset, valset, testset, batch_size:int=16, ddstore=False
 
     return train_loader, val_loader, test_loader
 
-def get_ensemble(args, ft_config, train_loader, val_loader, test_loader, freeze_conv=None):
+def get_ensemble(
+    args,
+    ft_config,
+    train_loader,
+    val_loader,
+    test_loader,
+    freeze_conv=None,
+    finetuning_log_dir=None,
+    modelname=None,
+):
     # ---- ensemble setup ----
     ensemble_path = Path(args.pretrained_model_ensemble_path)
-    model_dir_list = [os.path.join(ensemble_path, model_id) for model_id in os.listdir(ensemble_path)]
-    update_config_ensemble(model_dir_list, train_loader, val_loader, test_loader)
+    model_dir_list = [
+        os.path.join(ensemble_path, model_id)
+        for model_id in os.listdir(ensemble_path)
+    ]
 
-    if (freeze_conv is not None):
-        for modeldir in model_dir_list:
-            update_config_frozen_conv(os.path.join(modeldir, "config.json"), freeze_val=freeze_conv)
+    # Determine checkpoint_dir / checkpoint_path for config saving
+    checkpoint_dir = getattr(args, "checkpoint_dir", False)
+    checkpoint_path = None
+    if checkpoint_dir and finetuning_log_dir and modelname:
+        checkpoint_path = os.path.join(finetuning_log_dir, modelname)
+        os.makedirs(checkpoint_path, exist_ok=True)
 
-    train_from_scratch = args.train_from_scratch or ft_config["NeuralNetwork"]["Training"].get(
-        "train_from_scratch", False
+    gfm_2024 = getattr(args, "gfm_2024", True)
+    update_config_ensemble(
+        model_dir_list,
+        train_loader,
+        val_loader,
+        test_loader,
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_path=checkpoint_path,
+        GFM_2024=gfm_2024,
     )
+
+    if freeze_conv is not None:
+        for modeldir in model_dir_list:
+            update_config_frozen_conv(
+                os.path.join(modeldir, "config.json"), freeze_val=freeze_conv
+            )
+
+    train_from_scratch = getattr(args, "train_from_scratch", False) or ft_config[
+        "NeuralNetwork"
+    ]["Training"].get("train_from_scratch", False)
+
     model = model_ensemble(
         model_dir_list,
         fine_tune_config=ft_config,
-        GFM_2024=True,
+        GFM_2024=gfm_2024,
         train_from_scratch=train_from_scratch,
     )
     model = get_distributed_model(model, verbosity=2)
@@ -950,7 +1013,7 @@ def setup_distributed_finetuning():
     # Return variables
     return comm_size, rank, comm
 
-def run_finetune(dictionary_variables, args, freeze_conv:bool=None):
+def run_finetune(dictionary_variables, args, freeze_conv: bool = None):
     """Main training/validation/test entry point.
     Accepts an argparse.Namespace-like `args`.
     """
@@ -985,6 +1048,15 @@ def run_finetune(dictionary_variables, args, freeze_conv:bool=None):
         if args.batch_size is not None:
             ft_config["NeuralNetwork"]["Training"]["batch_size"] = args.batch_size
 
+        # num_epochs override (matbench multi-task convenience)
+        num_epochs_override = getattr(args, "num_epochs", None)
+        if num_epochs_override is not None:
+            ft_config["NeuralNetwork"]["Training"]["num_epoch"] = num_epochs_override
+
+        # freeze_conv from CLI flag if not passed as function argument
+        if freeze_conv is None:
+            freeze_conv = getattr(args, "freeze", None)
+
         # Initialize DDP/MPI
         comm_size, rank, comm = setup_distributed_finetuning()
 
@@ -1003,6 +1075,10 @@ def run_finetune(dictionary_variables, args, freeze_conv:bool=None):
 
         log("Command: {0}\n".format(" ".join([x for x in sys.argv])), rank=0)
 
+        # Ensure per-model checkpoint subdirectory exists when --checkpoint_dir is set
+        if getattr(args, "checkpoint_dir", False):
+            os.makedirs(os.path.join(finetuning_log_dir, modelname), exist_ok=True)
+
         # Get model list
         ensemble_path = Path(args.pretrained_model_ensemble_path)
         model_dir_list = [os.path.join(ensemble_path, model_id) for model_id in os.listdir(ensemble_path)]
@@ -1016,7 +1092,16 @@ def run_finetune(dictionary_variables, args, freeze_conv:bool=None):
                                                                 ddstore=args.ddstore)
 
         # Setup ensemble of models for fine-tuning
-        model = get_ensemble(args, ft_config, train_loader, val_loader, test_loader, freeze_conv=freeze_conv)
+        model = get_ensemble(
+            args,
+            ft_config,
+            train_loader,
+            val_loader,
+            test_loader,
+            freeze_conv=freeze_conv,
+            finetuning_log_dir=finetuning_log_dir,
+            modelname=modelname,
+        )
 
         from utils.debug import print_model_sanity_check
         print_model_sanity_check(model.module.model_ens[0])
@@ -1044,19 +1129,30 @@ def run_finetune(dictionary_variables, args, freeze_conv:bool=None):
         if save_ckpt:
             warmup = ft_config["NeuralNetwork"]["Training"].get("checkpoint_warmup", 0)
             member_checkpoints = []
+            use_ckpt_subdir = getattr(args, "checkpoint_dir", False)
             for idx, _ in enumerate(model.module.model_ens):
-                # Use the original pretrained model directory name
                 member_name = os.path.basename(model_dir_list[idx])
-                # ensure log directory exists for this member under configured logs root
-                os.makedirs(os.path.join(finetuning_log_dir, member_name), exist_ok=True)
-                member_checkpoints.append(
-                    Checkpoint(
-                        name=member_name,
-                        warmup=warmup,
-                        path=finetuning_log_dir,
-                        use_deepspeed=False,
+                if use_ckpt_subdir:
+                    ckpt_root = os.path.join(finetuning_log_dir, modelname)
+                    os.makedirs(os.path.join(ckpt_root, member_name), exist_ok=True)
+                    member_checkpoints.append(
+                        Checkpoint(
+                            name=member_name,
+                            warmup=warmup,
+                            path=ckpt_root,
+                            use_deepspeed=False,
+                        )
                     )
-                )
+                else:
+                    os.makedirs(os.path.join(finetuning_log_dir, member_name), exist_ok=True)
+                    member_checkpoints.append(
+                        Checkpoint(
+                            name=member_name,
+                            warmup=warmup,
+                            path=finetuning_log_dir,
+                            use_deepspeed=False,
+                        )
+                    )
 
         train_ensemble(
             model,
@@ -1069,9 +1165,60 @@ def run_finetune(dictionary_variables, args, freeze_conv:bool=None):
         )
 
         # Test the ensemble
-        test_ensemble(model, test_loader, modelname, verbosity=2, save_results=True)
+        true_, pred_mean, pred_std, natoms = test_ensemble(
+            model, test_loader, modelname, verbosity=2, save_results=True
+        )
 
-        # Optional: return something useful (e.g., final metrics)
+        # ---- matbench-specific post-processing ----
+        last_underscore_index = datasetname.rfind('_')
+        task = datasetname[:last_underscore_index]
+
+        pred_ = pred_mean[0]  # shape: [NumSamples]
+
+        if task in ["matbench_jdft2d"] and len(natoms) > 0:
+            natoms_ = torch.cat(natoms, dim=0)
+            print("PRED (meV/atom)", pred_.to('cpu') * 1000 / natoms_.to('cpu'))
+            print("TRUE (meV/atom)", true_[0].to('cpu') * 1000 / natoms_.to('cpu'))
+            absdiff_scaled = torch.absolute(
+                true_[0].to('cpu') * 1000 / natoms_.to('cpu')
+                - pred_.to('cpu') * 1000 / natoms_.to('cpu')
+            )
+            print("MAE (meV/atom):", torch.mean(absdiff_scaled).item())
+            print(
+                "RMSE (meV/atom):",
+                torch.sqrt(torch.mean(absdiff_scaled ** 2)).item(),
+            )
+            print("Max error (meV/atom):", torch.max(absdiff_scaled).item())
+
+        elif task in ["matbench_mp_is_metal"]:
+            print(
+                "CORRECT_COUNT:",
+                torch.eq(true_[0].to('cpu'), (torch.sigmoid(pred_.to('cpu')) > 0.5)).sum().item(),
+            )
+            print(
+                "Percentage Correct:",
+                torch.eq(true_[0].to('cpu'), (torch.sigmoid(pred_.to('cpu')) > 0.5)).sum().item()
+                / true_[0].to('cpu').shape[0],
+            )
+            print(
+                "ROCAUC:",
+                roc_auc_score(true_[0].detach().cpu().numpy(), pred_.detach().cpu().numpy()),
+            )
+            print(
+                "F1:",
+                f1_score(
+                    true_[0].detach().cpu().numpy(),
+                    (torch.sigmoid(pred_) > 0.5).detach().cpu().numpy(),
+                ),
+            )
+            print(
+                "Balanced_acc:",
+                balanced_accuracy_score(
+                    true_[0].detach().cpu().numpy(),
+                    (torch.sigmoid(pred_) > 0.5).detach().cpu().numpy(),
+                ),
+            )
+
         return True
     finally:
         torch.set_default_dtype(previous_default_dtype)
