@@ -18,8 +18,10 @@ if __name__ == "__main__":
     task = args.datasetname[:last_underscore_index]
     if task in ["matbench_mp_is_metal"]:
         args.finetuning_config = './examples/matbench/finetuning_config_bce.json'
-    else:
+    elif task in ["matbench_jdft2d"]:
         args.finetuning_config = './examples/matbench/finetuning_config.json'
+    else:
+        args.finetuning_config = './examples/matbench/finetuning_config_not_energy.json'
 
     # ---- feature schema (explicit override) ----
     graph_feature_names = ["energy"]
