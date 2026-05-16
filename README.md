@@ -15,40 +15,77 @@ The Graph Foundation Model (GFM) ensemble is a collection of pre-trained HydraGN
 
 ```
 ├── README.md
+├── HydraGNN/                         # HydraGNN install (gitignored, clone locally)
 ├── examples/
-│   └── qm9/
-│       ├── ensemble_fine_tune.py     # Main fine-tuning script for QM9
-│       ├── finetuning_config.json    # Configuration for fine-tuning heads
-│       └── qm9_preonly.py           # QM9 preprocessing script
+│   ├── abc3/
+│   │   ├── abc3_getData_API.py       # ABC3 data download via API
+│   │   ├── abc3_preonly.py           # ABC3 preprocessing script
+│   │   ├── ensemble_fine_tune.py     # Fine-tuning script for ABC3
+│   │   └── ensemble_fine_tune_sweep.py  # Hyperparameter sweep script
+│   ├── matbench/
+│   │   ├── matbench_preonly.py       # Matbench preprocessing script
+│   │   ├── ensemble_fine_tune.py     # Fine-tuning script for Matbench
+│   │   ├── finetuning_config.json    # Default config
+│   │   └── finetuning_config_bce.json  # Binary cross-entropy config
+│   ├── materials_project/
+│   │   ├── materials_project_preonly.py  # Materials Project preprocessing
+│   │   └── ensemble_fine_tune.py    # Fine-tuning script
+│   ├── md17/
+│   │   ├── md17_preonly.py           # MD17 preprocessing script
+│   │   ├── md17_mlip_preonly.py      # MD17 MLIP preprocessing script
+│   │   ├── ensemble_fine_tune.py     # Fine-tuning script for MD17
+│   │   ├── run_benchmark.py          # Benchmark runner
+│   │   └── param_count.py            # Parameter counting utility
+│   ├── ms25/
+│   │   ├── ms25_preonly.py           # MS25 preprocessing script
+│   │   └── ensemble_fine_tune.py    # Fine-tuning script for MS25
+│   ├── oqmd/
+│   │   ├── oqmd_getData.py           # OQMD data download script
+│   │   ├── oqmd_preonly.py           # OQMD preprocessing script
+│   │   ├── ensemble_fine_tune.py     # Fine-tuning script for OQMD
+│   │   └── ensemble_fine_tune_sweep.py  # Hyperparameter sweep script
+│   ├── qm9/
+│   │   ├── qm9_preonly.py            # QM9 preprocessing script
+│   │   ├── qm9_energy_preonly.py     # QM9 energy-only preprocessing
+│   │   ├── ensemble_fine_tune.py     # Fine-tuning script for QM9
+│   │   └── run_benchmark.py          # Benchmark runner
+│   └── wiggle150/
+│       ├── wiggle150_preonly.py      # Wiggle150 preprocessing script
+│       ├── ensemble_fine_tune.py     # Fine-tuning script for Wiggle150
+│       ├── run_benchmark.py          # Benchmark runner
+│       ├── benchmark_precision.py    # Precision benchmark utilities
+│       └── evaluate_checkpoint.py   # Checkpoint evaluation script
 └── utils/
     ├── __init__.py
     ├── ensemble_utils.py             # Core fine-tuning utilities
-    └── update_model.py              # Model architecture modification tools
+    ├── update_model.py               # Model architecture modification tools
+    ├── evaluate_dataset.py           # Dataset evaluation utilities
+    └── debug.py                      # Debugging utilities
 ```
 
 ## Installation
 
 ### Prerequisites
 
-1. **HydraGNN**: Install the latest version from the main branch:
+1. **HydraGNN v5.0**: Clone [HydraGNN v5.0](https://github.com/ORNL/HydraGNN/releases/tag/v5.0) directly into the project root (it is gitignored and kept local):
    ```bash
-   git clone https://github.com/ORNL/HydraGNN.git
+   cd /path/to/HydraGNN_GFM_FineTuning4Materials
+   git clone --branch v5.0 https://github.com/ORNL/HydraGNN.git
    cd HydraGNN
    pip install -e .
    ```
 
-2. **Python Dependencies**: Install the dependencies required by HydraGNN:
-   - Follow the installation instructions in the [HydraGNN repository](https://github.com/ORNL/HydraGNN)
-   - All required dependencies will be installed automatically when you install HydraGNN with `pip install -e .`
+2. **Python Dependencies**: All required dependencies are installed automatically with HydraGNN above.
+   Follow any additional instructions in the [HydraGNN v5.0 release notes](https://github.com/ORNL/HydraGNN/releases/tag/v5.0) for your platform.
 
-3. **Environment Setup**: Update your PYTHONPATH to include both directories:
+3. **Environment Setup**: Update your PYTHONPATH to include the project root:
    ```bash
-   export PYTHONPATH="${PYTHONPATH}:/path/to/HydraGNN_GFM_FineTuning4Materials:/path/to/HydraGNN"
+   export PYTHONPATH="${PYTHONPATH}:/path/to/HydraGNN_GFM_FineTuning4Materials"
    ```
-   
-   Or add these lines to your `.bashrc` or `.zshrc`:
+
+   Or add this to your `.bashrc` or `.zshrc`:
    ```bash
-   export PYTHONPATH="${PYTHONPATH}:/path/to/HydraGNN_GFM_FineTuning4Materials:/path/to/HydraGNN"
+   export PYTHONPATH="${PYTHONPATH}:/path/to/HydraGNN_GFM_FineTuning4Materials"
    ```
 
 ### Download Pre-trained Model Ensemble
@@ -66,14 +103,14 @@ The model ensemble contains multiple pre-trained models with their respective co
 
 ### Environment Setup
 
-**Important**: Before running any scripts, ensure your PYTHONPATH includes both the HydraGNN_GFM_FineTuning4Materials and HydraGNN directories:
+**Important**: Before running any scripts, ensure your PYTHONPATH includes the project root:
 
 ```bash
 # Option 1: Set temporarily for current session
-export PYTHONPATH="${PYTHONPATH}:/path/to/HydraGNN_GFM_FineTuning4Materials:/path/to/HydraGNN"
+export PYTHONPATH="${PYTHONPATH}:/path/to/HydraGNN_GFM_FineTuning4Materials"
 
 # Option 2: Add to your shell profile (~/.bashrc or ~/.zshrc)
-echo 'export PYTHONPATH="${PYTHONPATH}:/path/to/HydraGNN_GFM_FineTuning4Materials:/path/to/HydraGNN"' >> ~/.bashrc
+echo 'export PYTHONPATH="${PYTHONPATH}:/path/to/HydraGNN_GFM_FineTuning4Materials"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
@@ -148,7 +185,7 @@ The framework expects specific feature schemas that can be customized in the fin
 Core utilities for ensemble fine-tuning including:
 - Argument parsing for fine-tuning parameters
 - Distributed training setup
-- Model loading and configuration
+- Model loading and configuration (supports both ensemble root dirs and single pretrained model dirs)
 - Training loop management
 
 ### `utils/update_model.py`
@@ -157,9 +194,28 @@ Tools for modifying model architectures:
 - Adapting pre-trained models to new output dimensions
 - Handling different prediction types (graph-level, node-level)
 
+### `utils/evaluate_dataset.py`
+Utilities for evaluating model performance on datasets.
+
+### `utils/debug.py`
+Debugging helpers for inspecting models and data during development.
+
 ### Example Scripts
-- `examples/qm9/ensemble_fine_tune.py`: Complete example for QM9 molecular property prediction
-- `examples/qm9/qm9_preonly.py`: Data preprocessing utilities for QM9
+Each dataset under `examples/` follows the same pattern:
+- `*_preonly.py` — data download and preprocessing
+- `ensemble_fine_tune.py` — main fine-tuning launcher
+- `run_benchmark.py` — benchmark evaluation (where available)
+
+| Dataset | Description |
+|---|---|
+| `abc3` | ABC3 perovskite-type compounds |
+| `matbench` | Matbench materials benchmark suite |
+| `materials_project` | Materials Project database |
+| `md17` | MD17 molecular dynamics trajectories (also supports MLIP configs) |
+| `ms25` | MS25 dataset |
+| `oqmd` | Open Quantum Materials Database |
+| `qm9` | QM9 molecular property prediction (also supports energy-only configs) |
+| `wiggle150` | Wiggle150 benchmark dataset |
 
 ## Advanced Usage
 
@@ -184,11 +240,11 @@ The framework supports multi-task learning scenarios:
 ### Common Issues
 
 1. **Import Errors**: If you encounter `ModuleNotFoundError` for HydraGNN or project modules:
-   - Verify your PYTHONPATH includes both directories:
+   - Verify your PYTHONPATH includes the project root:
      ```bash
      echo $PYTHONPATH
      ```
-   - Check that the paths are correct and the directories exist
+   - Check that the path is correct and the directory exists
    - For VS Code debugging, the PYTHONPATH is automatically configured in `.vscode/launch.json`
 
 2. **Environment Variables**: Ensure you've sourced your shell profile after adding PYTHONPATH:
@@ -199,7 +255,7 @@ The framework supports multi-task learning scenarios:
 3. **Virtual Environment**: If using a virtual environment, activate it before setting PYTHONPATH:
    ```bash
    source .venv/bin/activate
-   export PYTHONPATH="${PYTHONPATH}:/path/to/HydraGNN_GFM_FineTuning4Materials:/path/to/HydraGNN"
+   export PYTHONPATH="${PYTHONPATH}:/path/to/HydraGNN_GFM_FineTuning4Materials"
    ```
 
 ## Contributing
@@ -212,5 +268,15 @@ This project follows the same license as HydraGNN. Please refer to the main Hydr
 
 ## Citation
 
-If you use this code in your research, please cite the relevant HydraGNN and GFM papers.
+If you use this code in your research, please cite HydraGNN v5.0:
+
+```
+Lupo Pasini, Massimiliano, Choi, Jong Youl, Mehta, Kshitij, Zhang, Pei, Weaver, Rylie,
+Messerly, Richard, Chowdhury, Arindam, Raman, Adithya, & Aji, Ashwin M. (2026).
+HydraGNN v5.0. https://doi.org/10.11578/dc.20260512.1
+```
+
+Available at:
+- Release: https://github.com/ORNL/HydraGNN/releases/tag/v5.0
+- DOE Code: https://www.osti.gov/biblio/code-180990
 
