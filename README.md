@@ -4,12 +4,15 @@ This repository provides tools and utilities for fine-tuning the HydraGNN Graph 
 
 ## Overview
 
-The Graph Foundation Model (GFM) ensemble is a collection of pre-trained HydraGNN models that can be fine-tuned for various molecular and materials property prediction tasks. This repository includes:
+This repository enables fine-tuning of the **HydraGNN Predictive GFM 2026** — an open-source ensemble of pre-trained graph foundation models for atomistic materials modeling, developed at Oak Ridge National Laboratory. The GFM 2026 is freely available and downloadable via Globus from the [OLCF Data Constellation](https://www.osti.gov/biblio/2562660) (DOI: [10.13139/OLCF/2562660](https://doi.org/10.13139/OLCF/2562660)).
 
-- Utilities for fine-tuning model ensembles
-- Example configurations for common datasets (QM9)
+Starting from these pre-trained weights, this repository provides a complete transfer learning pipeline for adapting the GFM ensemble to domain-specific molecular and materials property prediction tasks. It includes:
+
+- Utilities for ensemble fine-tuning with task-specific output heads
+- Example pipelines for eight widely-used materials and molecular datasets
 - Tools for model adaptation and head configuration
-- Data preprocessing utilities
+- Data preprocessing utilities for each supported dataset
+- Benchmarking and evaluation scripts
 
 ## Project Structure
 
@@ -90,14 +93,14 @@ The Graph Foundation Model (GFM) ensemble is a collection of pre-trained HydraGN
 
 ### Download Pre-trained Model Ensemble
 
-Download the pre-trained GFM ensemble from [HuggingFace](https://huggingface.co/mlupopa/HydraGNN_Predictive_GFM_2024):
+The **HydraGNN Predictive GFM 2026** is open source and available for download via Globus from the OLCF Data Constellation:
 
-```bash
-# Download all model checkpoints and configuration files
-# Each ensemble member will be fine-tuned independently
-```
+- **DOI**: [10.13139/OLCF/2562660](https://doi.org/10.13139/OLCF/2562660)
+- **OSTI record**: [https://www.osti.gov/biblio/2562660](https://www.osti.gov/biblio/2562660)
 
-The model ensemble contains multiple pre-trained models with their respective configuration files organized in a structured directory format.
+Download all ensemble member checkpoints and their configuration files via Globus, then place the ensemble root directory somewhere accessible on your system. Each ensemble member is stored in its own subdirectory containing the model checkpoint and a `config.json` file.
+
+Point the fine-tuning scripts to the downloaded ensemble root via the appropriate command-line argument (see Usage section below).
 
 ## Usage
 
@@ -268,14 +271,25 @@ This project follows the same license as HydraGNN. Please refer to the main Hydr
 
 ## Citation
 
-If you use this code in your research, please cite HydraGNN v5.0:
+If you use this code in your research, please cite both the pre-trained model and the HydraGNN framework.
 
+**Pre-trained Model — HydraGNN Predictive GFM 2026:**
 ```
-Lupo Pasini, Massimiliano, Choi, Jong Youl, Mehta, Kshitij, Zhang, Pei, Weaver, Rylie,
-Messerly, Richard, Chowdhury, Arindam, Raman, Adithya, & Aji, Ashwin M. (2026).
-HydraGNN v5.0. https://doi.org/10.11578/dc.20260512.1
+Lupo Pasini, Massimiliano, Choi, Jong Youl, Mehta, Kshitij, Messerly, Richard,
+Weaver, Rylie, Aji, Ashwin M., Schulz, Karl W., & Polo, Jorda (2026).
+HydraGNN_Predictive_GFM_2026 - Ensemble of predictive graph foundation models
+for atomistic materials modeling. https://doi.org/10.13139/OLCF/2562660
 ```
+Available at:
+- OLCF Data Constellation (Globus): https://www.osti.gov/biblio/2562660
 
+**HydraGNN Framework — v5.0:**
+```
+Lupo Pasini, Massimiliano, Choi, Jong Youl, Mehta, Kshitij, Zhang, Pei,
+Weaver, Rylie, Messerly, Richard, Chowdhury, Arindam, Raman, Adithya,
+& Aji, Ashwin M. (2026). HydraGNN v5.0.
+https://doi.org/10.11578/dc.20260512.1
+```
 Available at:
 - Release: https://github.com/ORNL/HydraGNN/releases/tag/v5.0
 - DOE Code: https://www.osti.gov/biblio/code-180990
