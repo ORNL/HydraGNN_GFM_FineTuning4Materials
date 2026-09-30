@@ -52,6 +52,11 @@ Starting from these pre-trained weights, this repository provides a complete tra
 │   │   ├── qm9_energy_preonly.py     # QM9 energy-only preprocessing
 │   │   ├── ensemble_fine_tune.py     # Fine-tuning script for QM9
 │   │   └── run_benchmark.py          # Benchmark runner
+|   ├── vasp/
+│   │   ├── main.py                   # Finetuning script
+│   │   ├── finetune_config.json      # Finetuning configuration file
+│   │   └── dataset/                  # Folder containing prepared dataset
+│   │       └── NaZrCl_5A_20N_Eform_400_fp64_size_100.pkl
 │   └── wiggle150/
 │       ├── wiggle150_preonly.py      # Wiggle150 preprocessing script
 │       ├── ensemble_fine_tune.py     # Fine-tuning script for Wiggle150
