@@ -68,6 +68,7 @@ Starting from these pre-trained weights, this repository provides a complete tra
     ├── ensemble_utils.py             # Core fine-tuning utilities
     ├── update_model.py               # Model architecture modification tools
     ├── evaluate_dataset.py           # Dataset evaluation utilities
+    ├── single_model_finetune.py      # fine-tuning utilities for a single pretrained model
     └── debug.py                      # Debugging utilities
 ```
 
