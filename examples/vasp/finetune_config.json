@@ -1,0 +1,78 @@
+{
+    "Verbosity": {
+        "level": 2
+    },
+    "NeuralNetwork": {
+        "Architecture": {
+            "freeze_conv_layers": false,
+            "enable_interatomic_potential": true,
+            "energy_weight": 0.0,
+            "energy_peratom_weight": 1.0,
+            "force_weight": 94.79230823761442,
+            "output_heads": {
+                "graph": [
+                    {
+                        "type": "branch-4",
+                        "architecture": {
+                            "dim_pretrained": 128,
+                            "num_sharedlayers": 2,
+                            "dim_sharedlayers": 5,
+                            "num_headlayers": 2,
+                            "dim_headlayers": [
+                                128,
+                                64
+                            ]
+                        }
+                    }
+                ]
+            },
+            "task_weights": [1.0],
+            "output_dim": [1],
+            "output_type": ["graph"]
+        },
+        "Variables_of_interest": {
+            "input_node_features": [0],
+            "output_names": ["graph_energy"],
+            "output_index": [0],
+            "output_dim": [1],
+            "type": ["graph"],
+            "denormalize_output": false,
+            "graph_feature_names": ["energy"],
+            "graph_feature_dims": [1],
+            "node_feature_names": ["atomic_number"],
+            "node_feature_dims": [1]
+        },
+        "Training": {
+            "Checkpoint": true,
+            "checkpoint_warmup": 50,
+            "num_epoch": 100,
+            "perc_train": 0.8,
+            "loss_function_type": "mae",
+            "loss_function_types": ["mae"],
+            "batch_size": 25,
+            "continue": 1,
+            "conv_checkpointing": true,
+            "startfrom": "pretrained_model/multidataset_hpo-BEST6-fp64_epoch_97.pk",
+            "Optimizer": {
+                "type": "AdamW",
+                "learning_rate": 0.0006336831699995408
+            },
+            "Scheduler": {
+                "type": "plateau",
+                "factor": 0.5,
+                "cooldown":0,
+                "threshold": 1e-4,
+                "patience": 5
+            },
+            "precision": "fp64"
+        },
+        "selected_branches": [5,7,8],
+        "all_branches": false,
+        "unfreeze_conv_layers": null
+    },
+        "Visualization": {
+        "plot_init_solution": false,
+        "plot_hist_solution": false,
+        "create_plots": false
+    }
+    }
