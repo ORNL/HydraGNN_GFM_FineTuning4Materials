@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Run HydraGNN fine-tuning on QM9 (full fine-tune, frozen, or scratch)."""
-from utils.ensemble_utils import build_arg_parser, run_finetune
+from hydragnn_gfm_finetuning.utils.ensemble_utils import build_arg_parser, run_finetune
 import os
 import json
 from pathlib import Path

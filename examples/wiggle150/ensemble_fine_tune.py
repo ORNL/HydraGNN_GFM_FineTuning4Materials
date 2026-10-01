@@ -11,7 +11,7 @@ import os
 # Add parent directories to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from utils.ensemble_utils import build_arg_parser, run_finetune, run_scratch
+from hydragnn_gfm_finetuning.utils.ensemble_utils import build_arg_parser, run_finetune, run_scratch
 
 if __name__ == "__main__":
     parser = build_arg_parser()

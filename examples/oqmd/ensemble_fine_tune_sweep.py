@@ -2,7 +2,7 @@
 
 """Run the oqmd fine-tuning sweep one case at a time and save per-case logs."""
 
-from utils.ensemble_sweep import run_example_sweep
+from hydragnn_gfm_finetuning.utils.ensemble_sweep import run_example_sweep
 
 
 if __name__ == "__main__":

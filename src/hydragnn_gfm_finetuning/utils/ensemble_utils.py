@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from typing import List
 
-import utils.update_model as um
+import hydragnn_gfm_finetuning.utils.update_model as um
 
 
 import os, json
@@ -63,6 +63,7 @@ except ImportError:
 import torch
 import glob, re
 from sklearn.metrics import roc_auc_score, balanced_accuracy_score, f1_score
+
 
 
 def _get_param_dtype(training_config: dict) -> torch.dtype:
@@ -173,6 +174,28 @@ def build_arg_parser():
         "--train_from_scratch",
         action="store_true",
         help="skip loading pretrained checkpoints and initialize the fine-tuning model weights from scratch",
+    )
+    parser.add_argument(
+        "--checkpoint_root",
+        type=str,
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+    )
+    parser.add_argument(
+        "--output_file",
+        type=str,
+    )
+    parser.add_argument(
+        "--matbench",
+        action="store_true",
+        help="for use with evaluate_finetuned_checkpoint",
+    )
+    parser.add_argument(
+        "--task_names",
+        nargs="+",
+        help="for use with matbench compile.py",
     )
 
     group = parser.add_mutually_exclusive_group()
@@ -929,7 +952,7 @@ def load_datasets(args, ft_config, dictionary_variables):
 
     elif args.format == "pickle":
         info("Pickle load")
-        basedir = os.path.join(os.path.dirname(__file__), "../dataset", f"{args.datasetname}.pickle")
+        basedir = os.path.join(os.getcwd(), "./dataset", f"{args.datasetname}.pickle")
         trainset = SimplePickleDataset(basedir=basedir, label="trainset", var_config=var_config)
         valset   = SimplePickleDataset(basedir=basedir, label="valset",   var_config=var_config)
         testset  = SimplePickleDataset(basedir=basedir, label="testset",  var_config=var_config)
@@ -947,7 +970,7 @@ def make_dataloaders(trainset, valset, testset, batch_size:int=16, ddstore=False
     if ddstore:
         os.environ["HYDRAGNN_AGGR_BACKEND"] = "mpi"
         os.environ["HYDRAGNN_USE_ddstore"] = "1"
-    (train_loader, val_loader, test_loader) = hydragnn.preprocess.create_dataloaders(trainset, valset, testset, batch_size)
+    (train_loader, val_loader, test_loader) = hydragnn.preprocess.create_dataloaders(trainset, valset, testset, batch_size, test_sampler_shuffle=False)
 
     return train_loader, val_loader, test_loader
 
@@ -966,7 +989,12 @@ def get_ensemble(
     model_dir_list = [
         os.path.join(ensemble_path, model_id)
         for model_id in os.listdir(ensemble_path)
+        if os.path.isdir(os.path.join(ensemble_path, model_id)) 
     ]
+    #model_dir_list = [
+    #    os.path.join(ensemble_path, model_id)
+    #    for model_id in os.scandir(ensemble_path) if model_id.is_dir()
+    #]
 
     # Determine checkpoint_dir / checkpoint_path for config saving
     checkpoint_dir = getattr(args, "checkpoint_dir", False)
@@ -1081,7 +1109,8 @@ def run_finetune(dictionary_variables, args, freeze_conv: bool = None):
 
         # Get model list
         ensemble_path = Path(args.pretrained_model_ensemble_path)
-        model_dir_list = [os.path.join(ensemble_path, model_id) for model_id in os.listdir(ensemble_path)]
+        model_dir_list = [os.path.join(ensemble_path, model_id) for model_id in os.listdir(ensemble_path) if os.path.isdir(os.path.join(ensemble_path, model_id))]
+        #model_dir_list = [os.path.join(ensemble_path, model_id) for model_id in os.scandir(ensemble_path) if model_id.is_dir()]
 
         # Load datasets
         trainset, valset, testset = load_datasets(args, ft_config, dictionary_variables)
@@ -1103,7 +1132,7 @@ def run_finetune(dictionary_variables, args, freeze_conv: bool = None):
             modelname=modelname,
         )
 
-        from utils.debug import print_model_sanity_check
+        from hydragnn_gfm_finetuning.utils.debug import print_model_sanity_check
         print_model_sanity_check(model.module.model_ens[0])
         # exit(9)
 
@@ -1170,55 +1199,352 @@ def run_finetune(dictionary_variables, args, freeze_conv: bool = None):
         )
 
         # ---- matbench-specific post-processing ----
-        last_underscore_index = datasetname.rfind('_')
-        task = datasetname[:last_underscore_index]
+        if args.matbench:
+            last_underscore_index = datasetname.rfind('_')
+            task = datasetname[:last_underscore_index]
 
-        pred_ = pred_mean[0]  # shape: [NumSamples]
+            pred_ = pred_mean[0]  # shape: [NumSamples]
 
-        if task in ["matbench_jdft2d"] and len(natoms) > 0:
-            natoms_ = torch.cat(natoms, dim=0)
-            print("PRED (meV/atom)", pred_.to('cpu') * 1000 / natoms_.to('cpu'))
-            print("TRUE (meV/atom)", true_[0].to('cpu') * 1000 / natoms_.to('cpu'))
-            absdiff_scaled = torch.absolute(
-                true_[0].to('cpu') * 1000 / natoms_.to('cpu')
-                - pred_.to('cpu') * 1000 / natoms_.to('cpu')
-            )
-            print("MAE (meV/atom):", torch.mean(absdiff_scaled).item())
-            print(
-                "RMSE (meV/atom):",
-                torch.sqrt(torch.mean(absdiff_scaled ** 2)).item(),
-            )
-            print("Max error (meV/atom):", torch.max(absdiff_scaled).item())
+            if task in ["matbench_jdft2d"] and len(natoms) > 0:
+                natoms_ = torch.cat(natoms, dim=0)
+                print("PRED (meV/atom)", pred_.to('cpu') * 1000 / natoms_.to('cpu'))
+                print("TRUE (meV/atom)", true_[0].to('cpu') * 1000 / natoms_.to('cpu'))
+                absdiff_scaled = torch.absolute(
+                    true_[0].to('cpu') * 1000 / natoms_.to('cpu')
+                    - pred_.to('cpu') * 1000 / natoms_.to('cpu')
+                )
+                print("MAE (meV/atom):", torch.mean(absdiff_scaled).item())
+                print(
+                    "RMSE (meV/atom):",
+                    torch.sqrt(torch.mean(absdiff_scaled ** 2)).item(),
+                )
+                print("Max error (meV/atom):", torch.max(absdiff_scaled).item())
 
-        elif task in ["matbench_mp_is_metal"]:
-            print(
-                "CORRECT_COUNT:",
-                torch.eq(true_[0].to('cpu'), (torch.sigmoid(pred_.to('cpu')) > 0.5)).sum().item(),
-            )
-            print(
-                "Percentage Correct:",
-                torch.eq(true_[0].to('cpu'), (torch.sigmoid(pred_.to('cpu')) > 0.5)).sum().item()
-                / true_[0].to('cpu').shape[0],
-            )
-            print(
-                "ROCAUC:",
-                roc_auc_score(true_[0].detach().cpu().numpy(), pred_.detach().cpu().numpy()),
-            )
-            print(
-                "F1:",
-                f1_score(
-                    true_[0].detach().cpu().numpy(),
-                    (torch.sigmoid(pred_) > 0.5).detach().cpu().numpy(),
-                ),
-            )
-            print(
-                "Balanced_acc:",
-                balanced_accuracy_score(
-                    true_[0].detach().cpu().numpy(),
-                    (torch.sigmoid(pred_) > 0.5).detach().cpu().numpy(),
-                ),
+            elif task in ["matbench_mp_is_metal"]:
+                print(
+                    "CORRECT_COUNT:",
+                    torch.eq(true_[0].to('cpu'), (torch.sigmoid(pred_.to('cpu')) > 0.5)).sum().item(),
+                )
+                print(
+                    "Percentage Correct:",
+                    torch.eq(true_[0].to('cpu'), (torch.sigmoid(pred_.to('cpu')) > 0.5)).sum().item()
+                    / true_[0].to('cpu').shape[0],
+                )
+                print(
+                    "ROCAUC:",
+                    roc_auc_score(true_[0].detach().cpu().numpy(), pred_.detach().cpu().numpy()),
+                )
+                print(
+                    "F1:",
+                    f1_score(
+                        true_[0].detach().cpu().numpy(),
+                        (torch.sigmoid(pred_) > 0.5).detach().cpu().numpy(),
+                    ),
+                )
+                print(
+                    "Balanced_acc:",
+                    balanced_accuracy_score(
+                        true_[0].detach().cpu().numpy(),
+                        (torch.sigmoid(pred_) > 0.5).detach().cpu().numpy(),
+                    ),
+                )
+
+        return True
+    finally:
+        torch.set_default_dtype(previous_default_dtype)
+
+def find_member_checkpoint(checkpoint_root: str, member_name: str) -> str:
+    """
+    Return the checkpoint file for a given member.
+    Prefers the symlink <member_name>.pk (best epoch) if it exists,
+    otherwise falls back to the highest *_epoch_*.pk file.
+    """
+    member_dir = os.path.join(checkpoint_root, member_name)
+    if not os.path.isdir(member_dir):
+        raise FileNotFoundError(
+            f"No checkpoint subdirectory found for member '{member_name}' "
+            f"in {checkpoint_root}.\n"
+            "Check that --checkpoint_root points to the right directory."
+        )
+    
+    symlink = os.path.join(member_dir, f"{member_name}.pk")
+    if os.path.exists(symlink):
+        return symlink
+
+def build_ensemble(model_dir_list: list, ft_config: dict,
+                   gfm_2024: bool) -> torch.nn.Module:
+    """
+    Build the full model_ensemble with architecture matching the fine-tuned
+    checkpoints, then wrap the whole ensemble in DDP -- same as get_ensemble().
+    """
+    ens = model_ensemble.__new__(model_ensemble)
+    torch.nn.Module.__init__(ens)
+    ens.model_dir_list = model_dir_list
+    ens.training_config = ft_config.get("NeuralNetwork", {}).get("Training", {})
+    ens.model_ens = torch.nn.ModuleList()
+
+    for modeldir in model_dir_list:
+        member = build_member_from_pretrained(modeldir, ft_config, gfm_2024)
+        ens.model_ens.append(member)
+
+    ens.num_heads  = ens.model_ens[0].module.num_heads
+    ens.head_type  = ens.model_ens[0].module.head_type
+    ens.head_dims  = ens.model_ens[0].module.head_dims
+    ens.model_size = len(model_dir_list)
+
+    # Wrap entire ensemble in DDP (same as get_ensemble -> get_distributed_model)
+    ens_ddp = get_distributed_model(ens, verbosity=2)
+    return ens_ddp
+
+def build_member_from_pretrained(modeldir: str, ft_config: dict,
+                                 gfm_2024: bool) -> torch.nn.Module:
+    """
+    Rebuild one ensemble member's architecture in a way that exactly mirrors
+    model_ensemble.__init__, so that optional modules like graph_concat_projector
+    are created if they were present in the pretrained checkpoint.
+    
+    Steps (matching model_ensemble.__init__):
+      1. create_model_config  -- bare architecture from pretrained config.json
+      2. get_distributed_model -- wrap in DDP
+      3. load_existing_model / update_GFM_2024_checkpoint -- loads pretrained
+         weights AND calls _ensure_graph_concat_projector etc. as needed
+      4. model.module -- unwrap DDP
+      5. update_model -- swap heads
+      6. get_distributed_model_find_unused -- re-wrap in DDP
+    """
+    with open(os.path.join(modeldir, "config.json")) as f:
+        config = json.load(f)
+
+    # Step 1+2: build and wrap
+    model = hydragnn.models.create_model_config(
+        config=config["NeuralNetwork"], verbosity=0
+    )
+    model = hydragnn.utils.distributed.get_distributed_model(model, verbosity=0)
+
+    # Step 3: load pretrained weights (this creates graph_concat_projector etc.)
+    member_name = os.path.basename(modeldir)
+    member_parent = os.path.dirname(modeldir)
+    if gfm_2024:
+        update_GFM_2024_checkpoint(model, member_name, path=member_parent)
+    else:
+        hydragnn.utils.model.load_existing_model(
+            model, member_name, path=member_parent
+        )
+
+    # Step 4+5+6: unwrap, swap heads, re-wrap
+    model = model.module
+    model = um.update_model(model, ft_config)
+    model = get_distributed_model_find_unused(model, verbosity=0)
+
+    return model
+
+def compute_predictions(task_name, true_vals, pred_mean, natoms):
+    """
+    Apply per-task post-processing and return the pred_vals array that
+    should be passed to task.record() and saved to JSON.
+    """
+    pred_ = pred_mean[0].cpu()
+    if task_name == "matbench_jdft2d" and natoms is not None:
+        natoms_ = torch.cat(natoms, dim=0)
+        return (pred_ * 1000 / natoms_.to('cpu')).numpy()
+
+    elif task_name == "matbench_mp_is_metal":
+        return torch.sigmoid(pred_).numpy()
+
+    else:
+        return pred_.numpy()
+    #true_ = true_vals[0].cpu()
+
+    #if task_name == "matbench_jdft2d" and natoms is not None:
+    #    natoms_ = torch.cat(natoms, dim=0)
+    #    pred_scaled = pred_ * 1000 / natoms_.to('cpu')
+    #    true_scaled = true_ * 1000 / natoms_.to('cpu')
+    #    absdiff = torch.abs(true_scaled - pred_scaled)
+    #    print(f"MAE  (meV/atom): {torch.mean(absdiff).item():.4f}")
+    #    print(f"RMSE (meV/atom): {torch.sqrt(torch.mean(absdiff**2)).item():.4f}")
+    #    return pred_scaled.numpy()
+
+    #elif task_name == "matbench_mp_is_metal":
+    #    probs = torch.sigmoid(pred_).numpy()
+    #    preds_binary = (probs > 0.5).astype(float)
+    #    true_np = true_.numpy()
+    #    print(f"ROC-AUC:      {roc_auc_score(true_np, probs):.4f}")
+    #    print(f"F1:           {f1_score(true_np, preds_binary):.4f}")
+    #    print(f"Balanced acc: {balanced_accuracy_score(true_np, preds_binary):.4f}")
+    #    return probs
+
+    #else:
+    #    pred_np = pred_.numpy()
+    #    true_np = true_.numpy()
+    #    print(f"MAE:  {mean_absolute_error(true_np, pred_np):.6f}")
+    #    print(f"RMSE: {float(np.sqrt(np.mean((pred_np - true_np)**2))):.6f}")
+    #    return pred_np
+
+def evaluate_finetuned_checkpoint(dictionary_variables, args):
+    ft_config = load_finetuning_config(args)
+    precision, param_dtype, _ = resolve_precision(
+        ft_config["NeuralNetwork"]["Training"].get("precision", "fp32")
+    )
+    ft_config["NeuralNetwork"]["Training"]["precision"] = precision
+    previous_default_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(param_dtype)
+
+    try:
+        # ---- default FINETUNING_LOG_DIR if not set ----
+        finetuning_log_dir = os.getenv("FINETUNING_LOG_DIR")
+        if not finetuning_log_dir:
+            try:
+                example_dir = Path(os.path.abspath(args.finetuning_config)).parent
+                finetuning_log_dir = str(example_dir / "logs")
+            except Exception:
+                finetuning_log_dir = "./logs"
+            os.environ["FINETUNING_LOG_DIR"] = finetuning_log_dir
+        os.makedirs(finetuning_log_dir, exist_ok=True)
+
+        verbosity = ft_config["Verbosity"]["level"]
+        if args.batch_size is not None:
+            ft_config["NeuralNetwork"]["Training"]["batch_size"] = args.batch_size
+
+        # Initialize DDP/MPI
+        comm_size, rank, comm = setup_distributed_finetuning()
+
+        # ---- logging ----
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%%(levelname)s (rank %d): %%(message)s" % (rank),
+            datefmt="%H:%M:%S",
+        )
+
+        datasetname = "FineTuning" if args.datasetname is None else args.datasetname
+        modelname = "FineTuning" if args.modelname is None else args.modelname
+        log_name = modelname
+        hydragnn.utils.print.print_utils.setup_log(log_name)
+        writer = hydragnn.utils.model.get_summary_writer(log_name, path=finetuning_log_dir)
+
+        log("Command: {0}\n".format(" ".join([x for x in sys.argv])), rank=0)
+
+        # Load datasets
+        trainset, valset, testset = load_datasets(args, ft_config, dictionary_variables)
+
+        # Make dataloaders
+        train_loader, val_loader, test_loader = make_dataloaders(trainset, valset, testset,
+                                                                batch_size=ft_config["NeuralNetwork"]["Training"]["batch_size"],
+                                                                ddstore=args.ddstore)
+
+        ensemble_path = args.pretrained_model_ensemble_path
+        model_dir_list = [ 
+            os.path.join(ensemble_path, m)
+            for m in os.listdir(ensemble_path)
+            if os.path.isdir(os.path.join(ensemble_path, m)) 
+        ]   
+        print(f"Found {len(model_dir_list)} ensemble members:")
+        for d in model_dir_list:
+            print(f"  {d}")
+
+        update_config_ensemble(
+            model_dir_list,
+            train_loader, val_loader, test_loader,
+            checkpoint_dir=False,
+            checkpoint_path=None,
+            GFM_2024=args.gfm_2024,
+        )
+
+        ens_ddp = build_ensemble(model_dir_list, ft_config, args.gfm_2024)
+        device = get_device()
+        ens_ddp = ens_ddp.to(device)
+
+        # ---- matbench-specific post-processing ----
+        if args.matbench:
+            last_underscore_index = datasetname.rfind('_')
+            task_name = datasetname[:last_underscore_index]
+            fold_idx  = int(args.datasetname[last_underscore_index + 1:])
+
+        print(f"\nLoading fine-tuned checkpoints from: {args.checkpoint_root}")
+        for i, model_dir in enumerate(model_dir_list):
+            member_name = os.path.basename(model_dir)
+            ckpt_path = find_member_checkpoint(args.checkpoint_root, member_name)
+            print(f"  [{i}] {member_name} <- {ckpt_path}")
+
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+
+            # ens_ddp.module.model_ens[i] is the DDP-wrapped member -- matching
+            # what save_model() saved, so keys line up directly.
+            ens_ddp.module.model_ens[i].load_state_dict(ckpt["model_state_dict"])
+
+        # Test the ensemble
+        true_, pred_mean, pred_std, natoms = test_ensemble(
+            ens_ddp, test_loader, modelname, verbosity=2, save_results=True
+        )
+
+        if args.matbench:
+            pred_ = pred_mean[0]  # shape: [NumSamples]
+
+            if task_name in ["matbench_jdft2d"] and len(natoms) > 0:
+                natoms_ = torch.cat(natoms, dim=0)
+                print("PRED (meV/atom)", pred_.to('cpu') * 1000 / natoms_.to('cpu'))
+                print("TRUE (meV/atom)", true_[0].to('cpu') * 1000 / natoms_.to('cpu'))
+                absdiff_scaled = torch.absolute(
+                    true_[0].to('cpu') * 1000 / natoms_.to('cpu')
+                    - pred_.to('cpu') * 1000 / natoms_.to('cpu')
+                )
+                print("MAE (meV/atom):", torch.mean(absdiff_scaled).item())
+                print(
+                    "RMSE (meV/atom):",
+                    torch.sqrt(torch.mean(absdiff_scaled ** 2)).item(),
+                )
+                print("Max error (meV/atom):", torch.max(absdiff_scaled).item())
+
+            elif task_name in ["matbench_mp_is_metal"]:
+                print(
+                    "CORRECT_COUNT:",
+                    torch.eq(true_[0].to('cpu'), (torch.sigmoid(pred_.to('cpu')) > 0.5)).sum().item(),
+                )
+                print(
+                    "Percentage Correct:",
+                    torch.eq(true_[0].to('cpu'), (torch.sigmoid(pred_.to('cpu')) > 0.5)).sum().item()
+                    / true_[0].to('cpu').shape[0],
+                )
+                print(
+                    "ROCAUC:",
+                    roc_auc_score(true_[0].detach().cpu().numpy(), pred_.detach().cpu().numpy()),
+                )
+                print(
+                    "F1:",
+                    f1_score(
+                        true_[0].detach().cpu().numpy(),
+                        (torch.sigmoid(pred_) > 0.5).detach().cpu().numpy(),
+                    ),
+                )
+                print(
+                    "Balanced_acc:",
+                    balanced_accuracy_score(
+                        true_[0].detach().cpu().numpy(),
+                        (torch.sigmoid(pred_) > 0.5).detach().cpu().numpy(),
+                    ),
+                )
+
+            pred_vals = compute_predictions(task_name, true_, pred_mean, natoms)
+            # Save raw predictions to JSON -- no MatbenchBenchmark object involved yet
+            os.makedirs(args.output_dir, exist_ok=True)
+            out_path = os.path.join(args.output_dir, f"{task_name}_fold{fold_idx}_predictions.json")
+            with open(out_path, "w") as f:
+                json.dump({
+                    "task_name": task_name,
+                    "fold_idx":  fold_idx,
+                    "predictions": pred_vals.tolist(),
+                }, f)
+        else:
+            # General case: save raw ensemble mean/std per head as numpy arrays
+            out_path = os.path.join(args.output_dir, f"{args.datasetname}_predictions.npz")
+            np.savez(
+                out_path,
+                **{f"true_head{i}":     t.cpu().numpy() for i, t in enumerate(true_vals)},
+                **{f"pred_mean_head{i}": p.cpu().numpy() for i, p in enumerate(pred_mean)},
+                **{f"pred_std_head{i}":  s.cpu().numpy() for i, s in enumerate(pred_std)},
             )
 
         return True
+
+
     finally:
         torch.set_default_dtype(previous_default_dtype)

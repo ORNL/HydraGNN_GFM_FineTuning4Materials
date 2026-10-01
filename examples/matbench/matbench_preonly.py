@@ -98,7 +98,8 @@ class MatbenchDataset(AbstractBaseDataset):
             else:
                 ii = i
             mol_list.append(self.pmg_to_graph(inputs[ii], outputs[ii]))
-        random.shuffle(mol_list)
+        if not self.test:
+            random.shuffle(mol_list)
         self.dataset.extend(mol_list)
 
     def pmg_to_graph(self, molecule, pred):

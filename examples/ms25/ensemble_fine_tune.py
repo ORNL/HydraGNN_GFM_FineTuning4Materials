@@ -2,7 +2,7 @@
 from pathlib import Path
 import os
 import json
-from utils.ensemble_utils import build_arg_parser, run_finetune
+from hydragnn_gfm_finetuning.utils.ensemble_utils import build_arg_parser, run_finetune
 
 MS25_CUTOFFS = {
     "MgO-2x2":  (6.0, 64),

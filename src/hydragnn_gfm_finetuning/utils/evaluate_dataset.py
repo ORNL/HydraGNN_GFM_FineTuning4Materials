@@ -1,4 +1,4 @@
-from utils.ensemble_utils import build_arg_parser, get_ensemble, load_finetuning_config, load_datasets, make_dataloaders, setup_distributed_finetuning, test_ensemble, test_ensemble_jamie
+from hydragnn_gfm_finetuning.utils.ensemble_utils import build_arg_parser, get_ensemble, load_finetuning_config, load_datasets, make_dataloaders, setup_distributed_finetuning, test_ensemble, test_ensemble_jamie
 from typing import List
 from torch.utils.data import DataLoader
 import numpy as np

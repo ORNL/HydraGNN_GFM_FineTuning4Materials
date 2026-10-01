@@ -4,7 +4,7 @@
     refactored so the main flow is a callable function that accepts an `args` object.
 """
 
-from utils.ensemble_utils import build_arg_parser, run_finetune
+from hydragnn_gfm_finetuning.utils.ensemble_utils import build_arg_parser, run_finetune
 
 if __name__ == "__main__":
     parser = build_arg_parser()
